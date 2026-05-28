@@ -78,8 +78,8 @@ if "roster" not in st.session_state:
     st.session_state.roster = None   # enriched schedule+staff DataFrame
 if "attendance" not in st.session_state:
     st.session_state.attendance = None # step 2 output
-if "headcount" not in st.session_state:
-    st.session_state.headcount = None # step 3 headcount file
+if "merged_headcount" not in st.session_state:
+    st.session_state.merged_headcount = None # step 3 result
 
 # ── constants ─────────────────────────────────────────────────────────────────
 EXCLUDED_LOCATIONS = {"clark", "dsi", "zamboanga", "isabela"}
@@ -192,6 +192,19 @@ def get_day_column(date_str: str) -> str:
         return None
     # strftime %a gives Mon, Tue, Wed, Thu, Fri, Sat, Sun
     return dt.strftime("%a")
+
+
+def clean_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert problematic columns to strings to avoid Arrow serialization errors."""
+    df = df.copy()
+    for col in df.columns:
+        # Convert object columns with mixed types to string
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+        # Convert nullable Int64 etc to regular int or object
+        elif pd.api.types.is_integer_dtype(df[col]) and df[col].isna().any():
+            df[col] = df[col].astype('Int64').astype(str).replace('<NA>', '')
+    return df
 
 
 # ── UI header ─────────────────────────────────────────────────────────────────
@@ -308,7 +321,7 @@ with tab1:
         disp = ["Name","FullName_Staff","CSLoginName","EmployeeNumber",
                 "OnSiteLocation","HireStatus","Position","MatchType"]
         disp = [c for c in disp if c in roster.columns]
-        st.dataframe(roster[disp], use_container_width=True, height=380)
+        st.dataframe(clean_for_display(roster[disp]), width="stretch", height=380)
 
         st.markdown("")
         d1, d2 = st.columns([2,1])
@@ -601,19 +614,19 @@ with tab2:
                 ["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent"]
             )
             with ta_all:
-                st.dataframe(att_df[disp], use_container_width=True, height=420)
+                st.dataframe(clean_for_display(att_df[disp]), width="stretch", height=420)
             with ta_present:
-                st.dataframe(att_df[att_df["Present"]==1][disp],
-                             use_container_width=True, height=420)
+                st.dataframe(clean_for_display(att_df[att_df["Present"]==1][disp]),
+                             width="stretch", height=420)
             with ta_review:
-                st.dataframe(att_df[att_df["For Review"]==1][disp],
-                             use_container_width=True, height=420)
+                st.dataframe(clean_for_display(att_df[att_df["For Review"]==1][disp]),
+                             width="stretch", height=420)
             with ta_leave:
-                st.dataframe(att_df[att_df["Leave"]==1][disp],
-                             use_container_width=True, height=420)
+                st.dataframe(clean_for_display(att_df[att_df["Leave"]==1][disp]),
+                             width="stretch", height=420)
             with ta_absent:
-                st.dataframe(att_df[att_df["Absent"]==1][disp],
-                             use_container_width=True, height=420)
+                st.dataframe(clean_for_display(att_df[att_df["Absent"]==1][disp]),
+                             width="stretch", height=420)
 
             st.markdown("---")
             ad1, ad2 = st.columns([2,1])
@@ -662,7 +675,7 @@ with tab3:
             "Upload headcount export (e.g. Knack RCM Headcount_05.13.2026.xlsx). "
             "Must contain ECN column.",
             type=["xlsx","xls"],
-            key="headcount", label_visibility="collapsed"
+            key="hc_uploader", label_visibility="collapsed"
         )
 
         st.markdown("")
@@ -716,7 +729,7 @@ with tab3:
             # Track match status
             merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
 
-            st.session_state.headcount = merged
+            st.session_state.merged_headcount = merged
 
             # ── metrics ──────────────────────────────────────────────────────
             total_m    = len(merged)
@@ -755,13 +768,13 @@ with tab3:
                 ["All Records", "✅ Matched", "❌ Unmatched"]
             )
             with t_all:
-                st.dataframe(merged[display_cols], use_container_width=True, height=420)
+                st.dataframe(clean_for_display(merged[display_cols]), width="stretch", height=420)
             with t_matched:
-                st.dataframe(merged[merged["HeadcountMatch"] == "✅ Matched"][display_cols],
-                             use_container_width=True, height=420)
+                st.dataframe(clean_for_display(merged[merged["HeadcountMatch"] == "✅ Matched"][display_cols]),
+                             width="stretch", height=420)
             with t_unmatched:
-                st.dataframe(merged[merged["HeadcountMatch"] == "❌ Unmatched"][display_cols],
-                             use_container_width=True, height=420)
+                st.dataframe(clean_for_display(merged[merged["HeadcountMatch"] == "❌ Unmatched"][display_cols]),
+                             width="stretch", height=420)
 
             st.markdown("---")
             md1, md2 = st.columns([2,1])
