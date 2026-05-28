@@ -38,6 +38,7 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 .fuzzy     { color: #facc15; }
 .neutral   { color: #a78bfa; }
 .review    { color: #fb923c; }
+.not-hired { color: #60a5fa; }
 
 .step-badge {
     display: inline-block;
@@ -236,9 +237,19 @@ def compute_late(shift_start: time, first_login_dt, date_obj: date) -> tuple[int
         return 1, round(diff, 2)
     return 0, 0.0
 
+# ── DOJ Knack helper ──────────────────────────────────────────────────────────
+def parse_doj_knack(value) -> date:
+    """Parse DOJ Knack value to date object. Returns None if unparseable."""
+    if pd.isna(value) or str(value).strip() in ("", "NaT"):
+        return None
+    dt = safe_parse_datetime(value)
+    if dt is not None:
+        return dt.date() if hasattr(dt, 'date') else dt
+    return None
+
 # ── UI header ─────────────────────────────────────────────────────────────────
 st.markdown("## 🗂️ Attendance Builder")
-st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave files → Step 3: merge headcount data.</p>', unsafe_allow_html=True)
+st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave files + headcount DOJ check → Step 3: merge headcount data.</p>', unsafe_allow_html=True)
 
 tab1, tab2, tab3 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Timesheet + Leave Attendance", "👤  Step 3 — Headcount Merge"])
 
@@ -380,7 +391,7 @@ with tab1:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Timesheet + Leave matched against roster
+# STEP 2 — Timesheet + Leave matched against roster + DOJ Knack check
 # ════════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown("")
@@ -429,12 +440,43 @@ with tab2:
         )
 
         st.markdown("")
+        st.markdown('<div class="section-header">👤 Headcount File (Optional — for DOJ Knack check)</div>', unsafe_allow_html=True)
+        hc_file_step2 = st.file_uploader(
+            "Upload headcount export to check DOJ Knack against attendance date. "
+            "Must contain ECN and DOJ Knack columns. If DOJ Knack is after the attendance date, "
+            "Shift will show 'Not yet hired' and Absent/Is Scheduled will be 0.",
+            type=["xlsx","xls"],
+            key="hc_step2", label_visibility="collapsed"
+        )
+
+        st.markdown("")
         run_step2 = st.button("▶  Build Attendance", key="btn_step2")
 
         if run_step2:
             if not ts_files:
                 st.warning("Upload at least one timesheet file.", icon="⚠️")
                 st.stop()
+
+            # ── Load headcount for DOJ Knack lookup (if provided) ────────────
+            doj_lookup: dict[int, date] = {}  # EmployeeNumber (int) → DOJ date
+            if hc_file_step2 is not None:
+                with st.spinner("Reading headcount for DOJ Knack check…"):
+                    hc_df_step2 = pd.read_excel(hc_file_step2, sheet_name=0)
+                if "ECN" not in hc_df_step2.columns:
+                    st.error("Headcount file must contain an **ECN** column.")
+                    st.stop()
+                if "DOJ Knack" not in hc_df_step2.columns:
+                    st.error("Headcount file must contain a **DOJ Knack** column.")
+                    st.stop()
+                hc_df_step2["ECN"] = pd.to_numeric(hc_df_step2["ECN"], errors="coerce")
+                hc_df_step2 = hc_df_step2.dropna(subset=["ECN"])
+                hc_df_step2["ECN"] = hc_df_step2["ECN"].astype(int)
+                for _, row in hc_df_step2.iterrows():
+                    ecn = int(row["ECN"])
+                    doj = parse_doj_knack(row.get("DOJ Knack"))
+                    if doj is not None:
+                        doj_lookup[ecn] = doj
+                st.info(f"Loaded {len(doj_lookup):,} DOJ Knack records from headcount file.")
 
             leave_by_date: dict[str, pd.DataFrame] = {}
             if leave_files:
@@ -453,6 +495,10 @@ with tab2:
                 date_str = ts_file.name.replace(".xlsx","").replace(".xls","")
                 if i == 0:
                     output_filename = f"{date_str}.xlsx"
+
+                # Parse the attendance date for DOJ comparison
+                parsed_date = parse_date_str(date_str)
+                date_obj = parsed_date.date() if parsed_date else None
 
                 try:
                     ts_df = read_timesheet(ts_file)
@@ -475,8 +521,6 @@ with tab2:
                             leave_lookup[normalize(name)] = lrow.to_dict()
 
                 day_col = get_day_column(date_str)
-                parsed_date = parse_date_str(date_str)  # used for late calculation
-                date_obj = parsed_date.date() if parsed_date else None
 
                 for _, r_row in roster.iterrows():
                     cs_key = str(r_row.get("CSLoginName","") or "").strip().lower()
@@ -508,6 +552,26 @@ with tab2:
                     # Day & Shift columns
                     out["Day"] = day_col if day_col else ""
                     out["Shift"] = shift_str if shift_str else ""
+
+                    # ── DOJ Knack check ──────────────────────────────────────
+                    # If headcount file was uploaded and we have a DOJ for this employee,
+                    # check if DOJ Knack is AFTER the attendance date
+                    not_yet_hired = False
+                    emp_num_raw = r_row.get("EmployeeNumber", "")
+                    try:
+                        emp_num = int(float(emp_num_raw)) if pd.notna(emp_num_raw) and str(emp_num_raw).strip() != "" else None
+                    except (ValueError, TypeError):
+                        emp_num = None
+
+                    if emp_num is not None and emp_num in doj_lookup and date_obj is not None:
+                        doj_date = doj_lookup[emp_num]
+                        if doj_date > date_obj:
+                            not_yet_hired = True
+                            out["Shift"] = "Not yet hired"
+                            out["Is Scheduled"] = 0
+                            # Also update the day column for display consistency
+                            if day_col and day_col in out:
+                                out[day_col] = "Not yet hired"
 
                     # Timesheet fields
                     first_login_raw = None
@@ -574,7 +638,13 @@ with tab2:
                     leave      = 0
                     absent     = 0
 
-                    if present == 1:
+                    if not_yet_hired:
+                        # Not yet hired: everything zero
+                        present = 0
+                        for_review = 0
+                        leave = 0
+                        absent = 0
+                    elif present == 1:
                         pass
                     elif for_review == 1:
                         pass
@@ -589,11 +659,16 @@ with tab2:
                     out["Absent"]     = absent
 
                     # ── Late calculation ─────────────────────────────────────
-                    shift_start_time = parse_shift_start(shift_str)  # shift from schedule
-                    first_login_dt = safe_parse_datetime(first_login_raw) if ts_row else None
-                    late_flag, late_minutes = compute_late(shift_start_time, first_login_dt, date_obj)
-                    out["Late"] = late_flag
-                    out["Late Minutes"] = late_minutes
+                    # Only calculate late if not "Not yet hired"
+                    if not_yet_hired:
+                        out["Late"] = 0
+                        out["Late Minutes"] = 0.0
+                    else:
+                        shift_start_time = parse_shift_start(shift_str)  # shift from schedule
+                        first_login_dt = safe_parse_datetime(first_login_raw) if ts_row else None
+                        late_flag, late_minutes = compute_late(shift_start_time, first_login_dt, date_obj)
+                        out["Late"] = late_flag
+                        out["Late Minutes"] = late_minutes
 
                     all_records.append(out)
 
@@ -613,15 +688,17 @@ with tab2:
             review_n   = att_df["For Review"].sum()
             leave_n    = att_df["Leave"].sum()
             absent_n   = att_df["Absent"].sum()
+            not_hired_n = (att_df["Shift"] == "Not yet hired").sum()
 
             st.markdown("---")
-            ma1, ma2, ma3, ma4, ma5 = st.columns(5)
+            ma1, ma2, ma3, ma4, ma5, ma6 = st.columns(6)
             for col, val, lbl, cls in [
                 (ma1, total_rows, "Total Rows",   ""),
                 (ma2, present_n,  "Present",       "matched"),
                 (ma3, review_n,   "For Review",    "review"),
                 (ma4, leave_n,    "On Leave",      "neutral"),
                 (ma5, absent_n,   "Absent",        "unmatched"),
+                (ma6, not_hired_n, "Not Yet Hired", "not-hired"),
             ]:
                 with col:
                     st.markdown(
@@ -637,8 +714,8 @@ with tab2:
                      "Late","Late Minutes","HireStatus","Position"] + DAY_COLS)
             disp = [c for c in disp if c in att_df.columns]
 
-            ta_all, ta_present, ta_review, ta_leave, ta_absent = st.tabs(
-                ["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent"]
+            ta_all, ta_present, ta_review, ta_leave, ta_absent, ta_not_hired = st.tabs(
+                ["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent", "🔵 Not Yet Hired"]
             )
             with ta_all:
                 st.dataframe(clean_for_display(att_df[disp]), width="stretch", height=420)
@@ -653,6 +730,9 @@ with tab2:
                              width="stretch", height=420)
             with ta_absent:
                 st.dataframe(clean_for_display(att_df[att_df["Absent"]==1][disp]),
+                             width="stretch", height=420)
+            with ta_not_hired:
+                st.dataframe(clean_for_display(att_df[att_df["Shift"]=="Not yet hired"][disp]),
                              width="stretch", height=420)
 
             st.markdown("---")
@@ -759,18 +839,44 @@ with tab3:
                 merged.loc[has_sep, "Absent"] = 0
                 merged.loc[has_sep, "Is Scheduled"] = 0
 
+            # ── DOJ Knack re-check after merge (in case Step 2 didn't have headcount) ──
+            # This ensures consistency even if headcount wasn't uploaded in Step 2
+            if "DOJ Knack" in merged.columns:
+                for idx, row in merged.iterrows():
+                    doj_val = row.get("DOJ Knack")
+                    date_str = row.get("Date", "")
+                    doj_date = parse_doj_knack(doj_val)
+                    parsed_date = parse_date_str(str(date_str))
+                    date_obj = parsed_date.date() if parsed_date else None
+
+                    if doj_date is not None and date_obj is not None and doj_date > date_obj:
+                        merged.at[idx, "Shift"] = "Not yet hired"
+                        merged.at[idx, "Is Scheduled"] = 0
+                        merged.at[idx, "Absent"] = 0
+                        merged.at[idx, "Present"] = 0
+                        merged.at[idx, "For Review"] = 0
+                        merged.at[idx, "Leave"] = 0
+                        merged.at[idx, "Late"] = 0
+                        merged.at[idx, "Late Minutes"] = 0.0
+                        # Update day column too
+                        day_col = row.get("Day", "")
+                        if day_col and day_col in DAY_COLS and day_col in merged.columns:
+                            merged.at[idx, day_col] = "Not yet hired"
+
             st.session_state.merged_headcount = merged
 
             total_m    = len(merged)
             matched_n  = (merged["HeadcountMatch"] == "✅ Matched").sum()
             unmatched_n = (merged["HeadcountMatch"] == "❌ Unmatched").sum()
+            not_hired_m = (merged["Shift"] == "Not yet hired").sum()
 
             st.markdown("---")
-            mm1, mm2, mm3 = st.columns(3)
+            mm1, mm2, mm3, mm4 = st.columns(4)
             for col, val, lbl, cls in [
                 (mm1, total_m,     "Total Rows",      ""),
                 (mm2, matched_n,   "Matched",         "matched"),
                 (mm3, unmatched_n, "Unmatched",        "unmatched"),
+                (mm4, not_hired_m, "Not Yet Hired",   "not-hired"),
             ]:
                 with col:
                     st.markdown(
@@ -793,8 +899,8 @@ with tab3:
                             "HeadcountMatch"] + DAY_COLS)
             display_cols = [c for c in display_cols if c in merged.columns]
 
-            t_all, t_matched, t_unmatched = st.tabs(
-                ["All Records", "✅ Matched", "❌ Unmatched"]
+            t_all, t_matched, t_unmatched, t_not_hired = st.tabs(
+                ["All Records", "✅ Matched", "❌ Unmatched", "🔵 Not Yet Hired"]
             )
             with t_all:
                 st.dataframe(clean_for_display(merged[display_cols]), width="stretch", height=420)
@@ -803,6 +909,9 @@ with tab3:
                              width="stretch", height=420)
             with t_unmatched:
                 st.dataframe(clean_for_display(merged[merged["HeadcountMatch"] == "❌ Unmatched"][display_cols]),
+                             width="stretch", height=420)
+            with t_not_hired:
+                st.dataframe(clean_for_display(merged[merged["Shift"] == "Not yet hired"][display_cols]),
                              width="stretch", height=420)
 
             st.markdown("---")
