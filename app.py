@@ -140,6 +140,15 @@ def read_timesheet(file) -> pd.DataFrame:
     df = df[df["Agent Email"].notna() & (df["Agent Email"].astype(str).str.strip() != "")]
     return df.reset_index(drop=True)
 
+def read_leave_file(file) -> pd.DataFrame:
+    """Reads leave file, skipping a duplicate header row if detected."""
+    df = pd.read_excel(file, sheet_name=0, header=0)
+    if len(df) > 0:
+        first_row_vals = [str(x).lower().strip() for x in df.iloc[0].values]
+        if "name" in first_row_vals and "position" in first_row_vals:
+            df = pd.read_excel(file, sheet_name=0, header=1)
+    return df
+
 def attendance_status(first_login, active) -> str:
     """
     Present     : has First Login AND Active >= 0.1
@@ -164,9 +173,9 @@ def attendance_status(first_login, active) -> str:
 
 # ── UI header ─────────────────────────────────────────────────────────────────
 st.markdown("## 🗂️ Attendance Builder")
-st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets against it.</p>', unsafe_allow_html=True)
+st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave files against it.</p>', unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Timesheet Attendance"])
+tab1, tab2 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Timesheet + Leave Attendance"])
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -297,7 +306,7 @@ with tab1:
             <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;
                         color:#e8eaf0;margin-bottom:0.4rem;">Upload Schedule + Staff to build the roster</div>
             <div style="font-size:0.85rem;">
-                Enriches each schedule row with <strong style="color:#4ade80">CSLoginName · EmployeeNumber · OnSiteLocation</strong>.<br>
+                Enriches each schedule row with <strong style="color:#4ade80">CSLoginName · EmployeeNumber · OnSiteLocation</strong>.<<br>
                 Excludes Clark · DSI · Zamboanga · Isabela &nbsp;·&nbsp;
                 Blank/<em>0000-0000</em> → <strong style="color:#a78bfa">Rest Day</strong>.
             </div>
@@ -306,7 +315,7 @@ with tab1:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Timesheet matched against roster
+# STEP 2 — Timesheet + Leave matched against roster
 # ════════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown("")
@@ -326,7 +335,7 @@ with tab2:
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown('<span class="step-badge done">✔ Roster loaded — upload timesheets below</span>',
+        st.markdown('<span class="step-badge done">✔ Roster loaded — upload files below</span>',
                     unsafe_allow_html=True)
         st.markdown(f'<span style="color:#7c7f8e;font-size:0.82rem;">'
                     f'{len(roster):,} roster rows · join key: CSLoginName</span>',
@@ -348,6 +357,14 @@ with tab2:
         )
 
         st.markdown("")
+        st.markdown('<div class="section-header">🌴 Leave File(s)</div>', unsafe_allow_html=True)
+        leave_files = st.file_uploader(
+            "Upload leave file(s) — filename = date (e.g. 5-13-2026.xlsx). Multi-upload supported.",
+            type=["xlsx","xls"], accept_multiple_files=True,
+            key="leave", label_visibility="collapsed"
+        )
+
+        st.markdown("")
         run_step2 = st.button("▶  Build Attendance", key="btn_step2")
 
         if run_step2:
@@ -355,11 +372,25 @@ with tab2:
                 st.warning("Upload at least one timesheet file.", icon="⚠️")
                 st.stop()
 
+            # ── index leave files by date ────────────────────────────────────
+            leave_by_date: dict[str, pd.DataFrame] = {}
+            if leave_files:
+                for lf in leave_files:
+                    ldate = lf.name.replace(".xlsx","").replace(".xls","")
+                    try:
+                        leave_by_date[ldate] = read_leave_file(lf)
+                    except Exception as e:
+                        st.error(f"Error reading leave file **{lf.name}**: {e}")
+
             all_records = []
             errors      = []
+            output_filename = "attendance.xlsx"
 
-            for ts_file in ts_files:
+            for i, ts_file in enumerate(ts_files):
                 date_str = ts_file.name.replace(".xlsx","").replace(".xls","")
+                if i == 0:
+                    output_filename = f"{date_str}.xlsx"
+
                 try:
                     ts_df = read_timesheet(ts_file)
                 except Exception as e:
@@ -367,14 +398,22 @@ with tab2:
                     continue
 
                 # Build a lookup: CSLoginName (agent email) → timesheet row
-                # Agent Email in timesheet IS the CSLoginName value
                 ts_by_cs: dict[str, dict] = {}
                 for _, ts_row in ts_df.iterrows():
                     agent_email = str(ts_row.get("Agent Email","")).strip().lower()
                     if agent_email:
                         ts_by_cs[agent_email] = ts_row.to_dict()
 
-                # Iterate over every roster row and join timesheet data
+                # Build leave lookup for this date (match by normalized Name)
+                leave_lookup: dict[str, dict] = {}
+                leave_df = leave_by_date.get(date_str)
+                if leave_df is not None:
+                    for _, lrow in leave_df.iterrows():
+                        name = str(lrow.get("name", lrow.get("Name", ""))).strip()
+                        if name:
+                            leave_lookup[normalize(name)] = lrow.to_dict()
+
+                # Iterate over every roster row and join timesheet + leave data
                 for _, r_row in roster.iterrows():
                     cs_key = str(r_row.get("CSLoginName","") or "").strip().lower()
                     ts_row = ts_by_cs.get(cs_key)
@@ -394,6 +433,9 @@ with tab2:
                         if day in r_row:
                             out[day] = r_row[day]
 
+                    # ── timesheet fields ─────────────────────────────────────
+                    first_login = None
+                    active      = None
                     if ts_row is not None:
                         first_login = ts_row.get("First Login")
                         active      = ts_row.get("Active")
@@ -402,15 +444,80 @@ with tab2:
                         out["LastLogout"]  = ts_row.get("Last Logout","")
                         out["Active"]      = active
                         out["Break"]       = ts_row.get("Break","")
-                        out["Attendance"]  = attendance_status(first_login, active)
                     else:
-                        # no timesheet record for this roster employee
                         out["AgentEmail"]  = ""
                         out["FirstLogin"]  = ""
                         out["LastLogout"]  = ""
                         out["Active"]      = ""
                         out["Break"]       = ""
-                        out["Attendance"]  = ""   # leave blank per spec
+
+                    # ── determine timesheet status ─────────────────────────
+                    ts_status = ""
+                    if ts_row is not None:
+                        ts_status = attendance_status(first_login, active)
+
+                    # ── determine leave status ─────────────────────────────
+                    leave_status = None
+                    norm_name = normalize(str(r_row.get("Name", "")))
+                    leave_row = leave_lookup.get(norm_name)
+
+                    if leave_row is None:
+                        # fuzzy fallback
+                        best_score, best_key = 0.0, None
+                        for key in leave_lookup:
+                            sc = SequenceMatcher(None, norm_name, key).ratio()
+                            if sc > best_score:
+                                best_score, best_key = sc, key
+                        if best_score >= FUZZY_THRESHOLD and best_key:
+                            leave_row = leave_lookup[best_key]
+
+                    if leave_row is not None:
+                        # SL / UPL → Absent
+                        for col in ["SL", "UPL"]:
+                            val = leave_row.get(col, 0)
+                            if pd.notna(val):
+                                try:
+                                    if float(val) > 0:
+                                        leave_status = "Absent"
+                                        break
+                                except (ValueError, TypeError):
+                                    if str(val).strip().lower() in ("1", "yes", "true", "y"):
+                                        leave_status = "Absent"
+                                        break
+                        # Other leave types → Leave
+                        if leave_status is None:
+                            for col in ["VL", "ML", "BL", "SPL", "PL", "MWL", "BDL"]:
+                                val = leave_row.get(col, 0)
+                                if pd.notna(val):
+                                    try:
+                                        if float(val) > 0:
+                                            leave_status = "Leave"
+                                            break
+                                    except (ValueError, TypeError):
+                                        if str(val).strip().lower() in ("1", "yes", "true", "y"):
+                                            leave_status = "Leave"
+                                            break
+
+                    # ── apply priority: Present → For Review → Leave → Absent
+                    present    = 1 if ts_status == "Present"     else 0
+                    for_review = 1 if ts_status == "For Review"  else 0
+                    leave      = 0
+                    absent     = 0
+
+                    if present == 1:
+                        pass
+                    elif for_review == 1:
+                        pass
+                    elif leave_status == "Leave":
+                        leave = 1
+                    else:
+                        # Covers: SL/UPL leave, no leave, no timesheet
+                        absent = 1
+
+                    out["Present"]    = present
+                    out["For Review"] = for_review
+                    out["Leave"]      = leave
+                    out["Absent"]     = absent
 
                     all_records.append(out)
 
@@ -425,18 +532,20 @@ with tab2:
             att_df = pd.DataFrame(all_records)
 
             # ── metrics ──────────────────────────────────────────────────────
-            total_rows  = len(att_df)
-            present_n   = (att_df["Attendance"] == "Present").sum()
-            review_n    = (att_df["Attendance"] == "For Review").sum()
-            blank_n     = (att_df["Attendance"] == "").sum()
+            total_rows = len(att_df)
+            present_n  = att_df["Present"].sum()
+            review_n   = att_df["For Review"].sum()
+            leave_n    = att_df["Leave"].sum()
+            absent_n   = att_df["Absent"].sum()
 
             st.markdown("---")
-            ma1, ma2, ma3, ma4 = st.columns(4)
+            ma1, ma2, ma3, ma4, ma5 = st.columns(5)
             for col, val, lbl, cls in [
                 (ma1, total_rows, "Total Rows",   ""),
                 (ma2, present_n,  "Present",       "matched"),
                 (ma3, review_n,   "For Review",    "review"),
-                (ma4, blank_n,    "No Record",     "unmatched"),
+                (ma4, leave_n,    "On Leave",      "neutral"),
+                (ma5, absent_n,   "Absent",        "unmatched"),
             ]:
                 with col:
                     st.markdown(
@@ -448,33 +557,38 @@ with tab2:
             st.markdown("")
 
             disp = (["Date","Name","CSLoginName","EmployeeNumber","OnSiteLocation",
-                     "Attendance","FirstLogin","LastLogout","Active","Break",
+                     "Present","Absent","Leave","For Review",
+                     "FirstLogin","LastLogout","Active","Break",
                      "HireStatus","Position"] + DAY_COLS)
             disp = [c for c in disp if c in att_df.columns]
 
-            ta_all, ta_present, ta_review, ta_blank = st.tabs(
-                ["All", "✅ Present", "🟠 For Review", "⬜ No Record"]
+            ta_all, ta_present, ta_review, ta_leave, ta_absent = st.tabs(
+                ["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent"]
             )
             with ta_all:
                 st.dataframe(att_df[disp], use_container_width=True, height=420)
             with ta_present:
-                st.dataframe(att_df[att_df["Attendance"]=="Present"][disp],
+                st.dataframe(att_df[att_df["Present"]==1][disp],
                              use_container_width=True, height=420)
             with ta_review:
-                st.dataframe(att_df[att_df["Attendance"]=="For Review"][disp],
+                st.dataframe(att_df[att_df["For Review"]==1][disp],
                              use_container_width=True, height=420)
-            with ta_blank:
-                st.dataframe(att_df[att_df["Attendance"]==""][disp],
+            with ta_leave:
+                st.dataframe(att_df[att_df["Leave"]==1][disp],
+                             use_container_width=True, height=420)
+            with ta_absent:
+                st.dataframe(att_df[att_df["Absent"]==1][disp],
                              use_container_width=True, height=420)
 
             st.markdown("---")
             ad1, ad2 = st.columns([2,1])
             with ad1:
                 st.download_button("⬇️ Download Attendance as Excel",
-                    to_excel_bytes(att_df), "attendance.xlsx",
+                    to_excel_bytes(att_df), output_filename,
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True)
             with ad2:
+                csv_name = output_filename.replace(".xlsx", ".csv").replace(".xls", ".csv")
                 st.download_button("⬇️ Download as CSV",
                     att_df.to_csv(index=False).encode(),
-                    "attendance.csv", "text/csv", use_container_width=True)
+                    csv_name, "text/csv", use_container_width=True)
