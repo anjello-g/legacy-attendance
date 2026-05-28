@@ -1147,6 +1147,16 @@ with tab3:
 
                 st.success("✔ Overrides applied!")
 
+            # ── Final consistency rules ────────────────────────────────────────
+            # Rule 1: If not scheduled, cannot be Absent or on Leave
+            not_scheduled = merged["Is Scheduled"] == 0
+            merged.loc[not_scheduled, "Absent"] = 0
+            merged.loc[not_scheduled, "Leave"] = 0
+
+            # Rule 2: If not scheduled but Present, they were effectively scheduled
+            present_but_not_scheduled = (merged["Is Scheduled"] == 0) & (merged["Present"] == 1)
+            merged.loc[present_but_not_scheduled, "Is Scheduled"] = 1
+
             st.session_state.merged_headcount = merged
 
             total_m    = len(merged)
