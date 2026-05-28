@@ -82,6 +82,8 @@ if "attendance" not in st.session_state:
     st.session_state.attendance = None
 if "merged_headcount" not in st.session_state:
     st.session_state.merged_headcount = None
+if "headcount_df" not in st.session_state:
+    st.session_state.headcount_df = None
 
 # ── constants ─────────────────────────────────────────────────────────────────
 EXCLUDED_LOCATIONS = {"clark", "dsi", "zamboanga", "isabela"}
@@ -440,11 +442,10 @@ with tab2:
         )
 
         st.markdown("")
-        st.markdown('<div class="section-header">👤 Headcount File (Optional — for DOJ Knack check)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">👤 Headcount File</div>', unsafe_allow_html=True)
         hc_file_step2 = st.file_uploader(
-            "Upload headcount export to check DOJ Knack against attendance date. "
-            "Must contain ECN and DOJ Knack columns. If DOJ Knack is after the attendance date, "
-            "Shift will show 'Not yet hired' and Absent/Is Scheduled will be 0.",
+            "Upload headcount export (e.g. Knack RCM Headcount_05.13.2026.xlsx). "
+            "Must contain ECN and DOJ Knack columns. Used for DOJ Knack check and Step 3 merge.",
             type=["xlsx","xls"],
             key="hc_step2", label_visibility="collapsed"
         )
@@ -457,10 +458,11 @@ with tab2:
                 st.warning("Upload at least one timesheet file.", icon="⚠️")
                 st.stop()
 
-            # ── Load headcount for DOJ Knack lookup (if provided) ────────────
+            # ── Load headcount for DOJ Knack lookup ────────────────────────────
             doj_lookup: dict[int, date] = {}  # EmployeeNumber (int) → DOJ date
+            hc_df_step2 = None
             if hc_file_step2 is not None:
-                with st.spinner("Reading headcount for DOJ Knack check…"):
+                with st.spinner("Reading headcount file…"):
                     hc_df_step2 = pd.read_excel(hc_file_step2, sheet_name=0)
                 if "ECN" not in hc_df_step2.columns:
                     st.error("Headcount file must contain an **ECN** column.")
@@ -477,6 +479,11 @@ with tab2:
                     if doj is not None:
                         doj_lookup[ecn] = doj
                 st.info(f"Loaded {len(doj_lookup):,} DOJ Knack records from headcount file.")
+                # Store headcount df in session state for Step 3
+                st.session_state.headcount_df = hc_df_step2.copy()
+            else:
+                st.session_state.headcount_df = None
+                st.info("No headcount file uploaded. DOJ Knack check and Step 3 merge will be skipped.")
 
             leave_by_date: dict[str, pd.DataFrame] = {}
             if leave_files:
@@ -750,12 +757,13 @@ with tab2:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Headcount Merge (ECN ↔ EmployeeNumber)
+# STEP 3 — Headcount Merge (uses headcount file from Step 2)
 # ════════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.markdown("")
 
     attendance = st.session_state.attendance
+    hc_df = st.session_state.headcount_df
 
     if attendance is None:
         st.markdown("""
@@ -765,37 +773,34 @@ with tab3:
             <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;
                         color:#e8eaf0;margin-bottom:0.4rem;">Complete Step 2 first</div>
             <div style="font-size:0.85rem;">
-                Build the attendance in <strong>Step 2</strong> before uploading the headcount file.
+                Build the attendance in <strong>Step 2</strong> before merging headcount data.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    elif hc_df is None:
+        st.markdown("""
+        <div style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:12px;
+                    padding:2rem;text-align:center;color:#7c7f8e;margin-top:1rem;">
+            <div style="font-size:2.5rem;margin-bottom:0.5rem;">📤</div>
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;
+                        color:#e8eaf0;margin-bottom:0.4rem;">No Headcount File Found</div>
+            <div style="font-size:0.85rem;">
+                Please upload the headcount file in <strong>Step 2</strong> first.<br>
+                It will be reused here for the full headcount merge.
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        step3_badge = '<span class="step-badge done">✔ Attendance loaded — upload headcount below</span>'
+        step3_badge = '<span class="step-badge done">✔ Attendance + Headcount loaded</span>'
         st.markdown(step3_badge, unsafe_allow_html=True)
         st.markdown(f'<span style="color:#7c7f8e;font-size:0.82rem;">'
                     f'{len(attendance):,} attendance rows · join key: EmployeeNumber → ECN</span>',
                     unsafe_allow_html=True)
 
         st.markdown("")
-        st.markdown('<div class="section-header">👤 Headcount File</div>', unsafe_allow_html=True)
-        hc_file = st.file_uploader(
-            "Upload headcount export (e.g. Knack RCM Headcount_05.13.2026.xlsx). "
-            "Must contain ECN column.",
-            type=["xlsx","xls"],
-            key="hc_uploader", label_visibility="collapsed"
-        )
-
-        st.markdown("")
         run_step3 = st.button("▶  Merge Headcount", key="btn_step3")
 
         if run_step3:
-            if not hc_file:
-                st.warning("Upload the headcount file first.", icon="⚠️")
-                st.stop()
-
-            with st.spinner("Reading headcount file…"):
-                hc_df = pd.read_excel(hc_file, sheet_name=0)
-
             required_hc = {"ECN", "Employee", "Project", "Sub-Process", "Supervisor",
                            "Role", "Manager", "DOJ Knack", "Date of Separation",
                            "Billable/Buffer", "Active/Inactive"}
@@ -828,6 +833,12 @@ with tab3:
             merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
             merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
 
+            # ── unmatched headcount rule ───────────────────────────────────────
+            # If headcount match is Unmatched, set Is Scheduled = 0 and Absent = 0
+            unmatched_mask = merged["HeadcountMatch"] == "❌ Unmatched"
+            merged.loc[unmatched_mask, "Is Scheduled"] = 0
+            merged.loc[unmatched_mask, "Absent"] = 0
+
             # ── separation date rule ─────────────────────────────────────────
             # If Date of Separation is present (not null/blank), set Absent & Is Scheduled to 0
             sep_col = "Date of Separation"
@@ -839,8 +850,7 @@ with tab3:
                 merged.loc[has_sep, "Absent"] = 0
                 merged.loc[has_sep, "Is Scheduled"] = 0
 
-            # ── DOJ Knack re-check after merge (in case Step 2 didn't have headcount) ──
-            # This ensures consistency even if headcount wasn't uploaded in Step 2
+            # ── DOJ Knack re-check after merge ────────────────────────────────
             if "DOJ Knack" in merged.columns:
                 for idx, row in merged.iterrows():
                     doj_val = row.get("DOJ Knack")
