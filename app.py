@@ -14,22 +14,11 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=Space+Grotesk:wght@400;600;700&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
-}
-h1, h2, h3 {
-    font-family: 'Space Grotesk', sans-serif;
-}
+html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 
-.stApp {
-    background: #0f1117;
-    color: #e8eaf0;
-}
-
-.block-container {
-    padding-top: 2rem;
-    max-width: 1400px;
-}
+.stApp { background: #0f1117; color: #e8eaf0; }
+.block-container { padding-top: 2rem; max-width: 1400px; }
 
 .metric-card {
     background: #1a1d27;
@@ -52,21 +41,9 @@ h1, h2, h3 {
     letter-spacing: 0.08em;
 }
 
-.matched { color: #4ade80; }
+.matched   { color: #4ade80; }
 .unmatched { color: #f87171; }
-.fuzzy { color: #facc15; }
-
-.badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 99px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-}
-.badge-exact { background: #14532d; color: #4ade80; }
-.badge-fuzzy { background: #422006; color: #facc15; }
-.badge-none  { background: #3f1515; color: #f87171; }
+.fuzzy     { color: #facc15; }
 
 div[data-testid="stFileUploader"] {
     background: #1a1d27;
@@ -74,11 +51,7 @@ div[data-testid="stFileUploader"] {
     border-radius: 12px;
     padding: 1rem;
 }
-
-div[data-testid="stDataFrame"] {
-    border-radius: 10px;
-    overflow: hidden;
-}
+div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
 
 .stButton > button {
     background: linear-gradient(135deg, #6366f1, #8b5cf6);
@@ -107,61 +80,57 @@ div[data-testid="stDataFrame"] {
 """, unsafe_allow_html=True)
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── constants ─────────────────────────────────────────────────────────────────
+EXCLUDED_LOCATIONS = {"clark", "dsi", "zamboanga", "isabela"}
+DAY_COLS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+FUZZY_THRESHOLD = 0.82
 
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 def normalize(name: str) -> str:
-    """Lowercase, collapse whitespace, strip punctuation."""
     if pd.isna(name):
         return ""
     name = str(name).lower().strip()
     name = re.sub(r"[^a-z\s]", "", name)
-    name = re.sub(r"\s+", " ", name)
-    return name
+    return re.sub(r"\s+", " ", name)
 
 
-def build_staff_lookup(staff_df: pd.DataFrame):
-    """Return two dicts keyed by normalised name → row index list."""
-    exact: dict[str, list[int]] = {}
+def build_staff_lookup(staff_df: pd.DataFrame) -> dict:
+    lookup: dict[str, list[int]] = {}
     for idx, row in staff_df.iterrows():
-        # index by the 'Name' column (full name as stored in staff)
         key = normalize(row.get("Name", ""))
         if key:
-            exact.setdefault(key, []).append(idx)
-        # also index by first+last concatenation as fallback
+            lookup.setdefault(key, []).append(idx)
         first = normalize(row.get("FirstName", ""))
         last  = normalize(row.get("LastName",  ""))
         if first and last:
-            exact.setdefault(f"{first} {last}", []).append(idx)
-    return exact
+            lookup.setdefault(f"{first} {last}", []).append(idx)
+    return lookup
 
 
-def similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, a, b).ratio()
-
-
-def match_name(sched_name: str, lookup: dict, staff_df: pd.DataFrame,
-               fuzzy_threshold: float = 0.82):
+def match_name(sched_name: str, lookup: dict, staff_df: pd.DataFrame):
     norm = normalize(sched_name)
     if not norm:
         return None, "no_name"
-
-    # 1) exact match
     if norm in lookup:
-        idx = lookup[norm][0]
-        return staff_df.loc[idx], "exact"
-
-    # 2) fuzzy match
+        return staff_df.loc[lookup[norm][0]], "exact"
     best_score, best_key = 0.0, None
     for key in lookup:
-        sc = similarity(norm, key)
+        sc = SequenceMatcher(None, norm, key).ratio()
         if sc > best_score:
             best_score, best_key = sc, key
-
-    if best_score >= fuzzy_threshold and best_key:
-        idx = lookup[best_key][0]
-        return staff_df.loc[idx], f"fuzzy({best_score:.0%})"
-
+    if best_score >= FUZZY_THRESHOLD and best_key:
+        return staff_df.loc[lookup[best_key][0]], f"fuzzy({best_score:.0%})"
     return None, "unmatched"
+
+
+def normalize_schedule(val) -> str:
+    if pd.isna(val):
+        return "Rest Day"
+    s = str(val).strip()
+    if s == "" or s == "0000 - 0000":
+        return "Rest Day"
+    return s
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -171,8 +140,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-# ── UI ───────────────────────────────────────────────────────────────────────
-
+# ── UI ────────────────────────────────────────────────────────────────────────
 st.markdown("## 🔗 Schedule → Staff Matcher")
 st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Upload both files, run the match, download the enriched result.</p>', unsafe_allow_html=True)
 
@@ -191,13 +159,6 @@ with col_r:
                                   key="staff", label_visibility="collapsed")
 
 st.markdown("")
-
-fuzzy_threshold = st.slider(
-    "Fuzzy match sensitivity (higher = stricter)",
-    min_value=0.70, max_value=1.00, value=0.82, step=0.01,
-    help="Names scoring above this threshold are considered fuzzy matches."
-)
-
 run = st.button("▶  Run Match", use_container_width=False)
 
 if run:
@@ -206,15 +167,14 @@ if run:
         st.stop()
 
     with st.spinner("Reading files…"):
-        sched_df = pd.read_excel(sched_file,  sheet_name=0)
+        sched_df = pd.read_excel(sched_file, sheet_name=0)
         staff_df = pd.read_excel(staff_file, sheet_name=0)
 
     if "Name" not in sched_df.columns:
         st.error("Schedule file must have a **Name** column.")
         st.stop()
 
-    required = {"Name", "CSLoginName", "EmployeeNumber"}
-    missing  = required - set(staff_df.columns)
+    missing = {"Name", "CSLoginName", "EmployeeNumber"} - set(staff_df.columns)
     if missing:
         st.error(f"Staff file is missing columns: {missing}")
         st.stop()
@@ -223,40 +183,53 @@ if run:
         lookup = build_staff_lookup(staff_df)
         records = []
         for _, row in sched_df.iterrows():
-            matched_row, match_type = match_name(
-                row["Name"], lookup, staff_df, fuzzy_threshold
-            )
+            matched_row, match_type = match_name(row["Name"], lookup, staff_df)
             out = row.to_dict()
+
+            # Normalize day columns → Rest Day where blank/null/0000-0000
+            for day in DAY_COLS:
+                if day in out:
+                    out[day] = normalize_schedule(out[day])
+
             if matched_row is not None:
-                loc = matched_row.get("On Site Location", "")
-                out["FullName_Staff"]   = matched_row.get("Name", "")
-                out["CSLoginName"]      = matched_row.get("CSLoginName", "")
-                out["EmployeeNumber"]   = matched_row.get("EmployeeNumber", "")
-                out["OnSiteLocation"]   = loc if (pd.notna(loc) and str(loc).strip()) else "WFH"
-                out["MatchType"]        = match_type
+                loc_raw = matched_row.get("On Site Location", "")
+                loc = loc_raw if (pd.notna(loc_raw) and str(loc_raw).strip()) else "WFH"
+                out["FullName_Staff"] = matched_row.get("Name", "")
+                out["CSLoginName"]    = matched_row.get("CSLoginName", "")
+                out["EmployeeNumber"] = matched_row.get("EmployeeNumber", "")
+                out["OnSiteLocation"] = loc
+                out["MatchType"]      = match_type
             else:
-                out["FullName_Staff"]   = ""
-                out["CSLoginName"]      = ""
-                out["EmployeeNumber"]   = ""
-                out["OnSiteLocation"]   = ""
-                out["MatchType"]        = match_type
+                out["FullName_Staff"] = ""
+                out["CSLoginName"]    = ""
+                out["EmployeeNumber"] = ""
+                out["OnSiteLocation"] = ""
+                out["MatchType"]      = match_type
             records.append(out)
 
     result_df = pd.DataFrame(records)
 
-    # ── metrics ──────────────────────────────────────────────────────────────
+    # ── exclude specified locations ───────────────────────────────────────────
+    before_filter = len(result_df)
+    result_df = result_df[
+        ~result_df["OnSiteLocation"].str.strip().str.lower().isin(EXCLUDED_LOCATIONS)
+    ]
+    excluded_count = before_filter - len(result_df)
+
+    # ── metrics ───────────────────────────────────────────────────────────────
     total     = len(result_df)
     exact_n   = result_df["MatchType"].str.startswith("exact").sum()
     fuzzy_n   = result_df["MatchType"].str.startswith("fuzzy").sum()
     unmatched = result_df["MatchType"].isin(["unmatched", "no_name"]).sum()
 
     st.markdown("---")
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     for col, val, lbl, cls in [
-        (m1, total,     "Total Rows",        ""),
-        (m2, exact_n,   "Exact Matches",     "matched"),
-        (m3, fuzzy_n,   "Fuzzy Matches",     "fuzzy"),
-        (m4, unmatched, "Unmatched",         "unmatched"),
+        (m1, total,          "Rows After Filter",   ""),
+        (m2, exact_n,        "Exact Matches",       "matched"),
+        (m3, fuzzy_n,        "Fuzzy Matches",       "fuzzy"),
+        (m4, unmatched,      "Unmatched",           "unmatched"),
+        (m5, excluded_count, "Excluded (Location)", "unmatched"),
     ]:
         with col:
             st.markdown(
@@ -267,7 +240,7 @@ if run:
 
     st.markdown("")
 
-    # ── tabs ─────────────────────────────────────────────────────────────────
+    # ── tabs ──────────────────────────────────────────────────────────────────
     tab_all, tab_exact, tab_fuzzy, tab_unmatched = st.tabs(
         ["All Results", "✅ Exact", "🟡 Fuzzy", "❌ Unmatched"]
     )
@@ -281,34 +254,28 @@ if run:
 
     with tab_all:
         show_table(result_df)
-
     with tab_exact:
         show_table(result_df[result_df["MatchType"].str.startswith("exact")])
-
     with tab_fuzzy:
         show_table(result_df[result_df["MatchType"].str.startswith("fuzzy")])
-
     with tab_unmatched:
         show_table(result_df[result_df["MatchType"].isin(["unmatched", "no_name"])])
 
-    # ── download ─────────────────────────────────────────────────────────────
+    # ── download ──────────────────────────────────────────────────────────────
     st.markdown("---")
-    dl_col1, dl_col2 = st.columns([2, 1])
-    with dl_col1:
-        excel_bytes = to_excel_bytes(result_df)
+    dl1, dl2 = st.columns([2, 1])
+    with dl1:
         st.download_button(
             label="⬇️  Download Full Result as Excel",
-            data=excel_bytes,
+            data=to_excel_bytes(result_df),
             file_name="schedule_matched.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
-    csv_bytes = result_df.to_csv(index=False).encode()
-    with dl_col2:
+    with dl2:
         st.download_button(
             label="⬇️  Download as CSV",
-            data=csv_bytes,
+            data=result_df.to_csv(index=False).encode(),
             file_name="schedule_matched.csv",
             mime="text/csv",
             use_container_width=True,
@@ -324,8 +291,11 @@ else:
         </div>
         <div style="font-size:0.85rem;">
             The app will match names from the Schedule to the Staff roster<br>
-            and return <strong style="color:#4ade80">CSLoginName</strong> and
-            <strong style="color:#4ade80">EmployeeNumber</strong> for each row.
+            and return <strong style="color:#4ade80">CSLoginName</strong>,
+            <strong style="color:#4ade80">EmployeeNumber</strong>, and
+            <strong style="color:#4ade80">OnSiteLocation</strong> for each row.<br><br>
+            Rows where location is <em>Clark, DSI, Zamboanga, or Isabela</em> are excluded.<br>
+            Schedule slots that are blank or <em>0000 - 0000</em> are marked as <strong style="color:#a78bfa">Rest Day</strong>.
         </div>
     </div>
     """, unsafe_allow_html=True)
