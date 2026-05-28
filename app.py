@@ -249,6 +249,103 @@ def parse_doj_knack(value) -> date:
         return dt.date() if hasattr(dt, 'date') else dt
     return None
 
+# ── Override date helper ──────────────────────────────────────────────────────
+def parse_override_date(value) -> date:
+    """Parse an override file date value. Returns None if unparseable."""
+    if pd.isna(value) or str(value).strip() in ("", "NaT", "None"):
+        return None
+    dt = safe_parse_datetime(value)
+    if dt is not None:
+        return dt.date() if hasattr(dt, 'date') else dt
+    # Try common raw formats
+    for fmt in ("%m-%d-%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y",
+                "%m-%d-%y", "%d-%m-%y", "%y-%m-%d"):
+        try:
+            return datetime.strptime(str(value).strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+def build_override_template() -> bytes:
+    """Build a 3-sheet Excel template for overrides."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    buf = BytesIO()
+    wb = Workbook()
+
+    # Common styles
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4338ca", end_color="4338ca", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_border = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin')
+    )
+
+    # ── Sheet 1: Schedule ─────────────────────────────────────────────
+    ws1 = wb.active
+    ws1.title = "Schedule"
+    sched_headers = ["ECN", "Effective Date", "Effective Until", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    ws1.append(sched_headers)
+    for col in range(1, len(sched_headers) + 1):
+        cell = ws1.cell(row=1, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+    ws1.append([12345, "05-01-2026", "05-31-2026", "0900 - 1800", "Rest Day", "0900 - 1800", "0900 - 1800", "0900 - 1800", "0900 - 1800", "Rest Day"])
+    ws1.append([67890, "05-15-2026", "05-15-2026", "Rest Day", "Rest Day", "Rest Day", "Rest Day", "1200 - 2100", "Rest Day", "Rest Day"])
+    for row in ws1.iter_rows(min_row=2, max_row=ws1.max_row):
+        for cell in row:
+            cell.border = thin_border
+    ws1.column_dimensions['A'].width = 12
+    ws1.column_dimensions['B'].width = 16
+    ws1.column_dimensions['C'].width = 16
+    for c in ['D','E','F','G','H','I','J']:
+        ws1.column_dimensions[c].width = 14
+
+    # ── Sheet 2: Leave ────────────────────────────────────────────────
+    ws2 = wb.create_sheet(title="Leave")
+    leave_headers = ["ECN", "Date", "Leave"]
+    ws2.append(leave_headers)
+    for col in range(1, len(leave_headers) + 1):
+        cell = ws2.cell(row=1, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+    ws2.append([12345, "05-20-2026", 1])
+    ws2.append([67890, "05-25-2026", 1])
+    for row in ws2.iter_rows(min_row=2, max_row=ws2.max_row):
+        for cell in row:
+            cell.border = thin_border
+    ws2.column_dimensions['A'].width = 12
+    ws2.column_dimensions['B'].width = 16
+    ws2.column_dimensions['C'].width = 10
+
+    # ── Sheet 3: Holidays ─────────────────────────────────────────────
+    ws3 = wb.create_sheet(title="Holidays")
+    holiday_headers = ["Client", "Sub-Process", "Date"]
+    ws3.append(holiday_headers)
+    for col in range(1, len(holiday_headers) + 1):
+        cell = ws3.cell(row=1, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+    ws3.append(["Project Alpha", "", "05-01-2026"])
+    ws3.append(["Project Beta", "Sub-Process X", "05-12-2026"])
+    ws3.append(["Project Gamma", "", "05-30-2026"])
+    for row in ws3.iter_rows(min_row=2, max_row=ws3.max_row):
+        for cell in row:
+            cell.border = thin_border
+    ws3.column_dimensions['A'].width = 20
+    ws3.column_dimensions['B'].width = 20
+    ws3.column_dimensions['C'].width = 16
+
+    wb.save(buf)
+    return buf.getvalue()
+
 # ── UI header ─────────────────────────────────────────────────────────────────
 st.markdown("## 🗂️ Attendance Builder")
 st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave files + headcount DOJ check → Step 3: merge headcount data.</p>', unsafe_allow_html=True)
@@ -798,6 +895,37 @@ with tab3:
                     unsafe_allow_html=True)
 
         st.markdown("")
+        st.markdown('<div class="section-header">📋 Override File (Optional)</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<span style="color:#7c7f8e;font-size:0.82rem;">'
+            'Upload an Excel file with 3 sheets: <strong>Schedule</strong>, <strong>Leave</strong>, <strong>Holidays</strong>. '
+            'These manually override shifts, leave status, and holiday rules.</span>',
+            unsafe_allow_html=True
+        )
+        override_file = st.file_uploader(
+            "Override file",
+            type=["xlsx"],
+            key="override_uploader", label_visibility="collapsed"
+        )
+
+        st.markdown("")
+        tmpl1, tmpl2 = st.columns([1,1])
+        with tmpl1:
+            st.download_button(
+                "⬇️ Download Override Template",
+                build_override_template(),
+                "override_template.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        with tmpl2:
+            st.markdown(
+                '<div style="color:#7c7f8e;font-size:0.78rem;padding-top:0.4rem;">'
+                'Template includes sample rows for all 3 sheets.</div>',
+                unsafe_allow_html=True
+            )
+
+        st.markdown("")
         run_step3 = st.button("▶  Merge Headcount", key="btn_step3")
 
         if run_step3:
@@ -872,6 +1000,152 @@ with tab3:
                         day_col = row.get("Day", "")
                         if day_col and day_col in DAY_COLS and day_col in merged.columns:
                             merged.at[idx, day_col] = "Not yet hired"
+
+            # ── Override processing ──────────────────────────────────────────
+            if override_file is not None:
+                with st.spinner("Applying overrides…"):
+                    xl = pd.ExcelFile(override_file)
+
+                    # 1. Schedule Override
+                    if "Schedule" in xl.sheet_names:
+                        sched_ov = pd.read_excel(override_file, sheet_name="Schedule")
+                        required_sched = {"ECN", "Effective Date", "Effective Until"}
+                        # Check for at least one day column
+                        day_cols_found = [d for d in DAY_COLS if d in sched_ov.columns]
+                        if required_sched.issubset(set(sched_ov.columns)) and day_cols_found:
+                            sched_ov["ECN"] = pd.to_numeric(sched_ov["ECN"], errors="coerce")
+                            sched_ov = sched_ov.dropna(subset=["ECN"])
+                            sched_ov["ECN"] = sched_ov["ECN"].astype(int)
+
+                            for _, ov_row in sched_ov.iterrows():
+                                ecn = int(ov_row["ECN"])
+                                eff_start = parse_override_date(ov_row.get("Effective Date"))
+                                eff_end   = parse_override_date(ov_row.get("Effective Until"))
+
+                                if eff_start is None or eff_end is None:
+                                    continue
+
+                                # Find all merged rows matching this ECN and date range
+                                mask = (
+                                    (merged["EmployeeNumber"].astype(str).str.strip() == str(ecn)) &
+                                    (merged["Date"].apply(lambda d: parse_date_str(str(d)) is not None)) &
+                                    (merged["Date"].apply(lambda d: parse_override_date(str(d)) is not None))
+                                )
+                                # More precise date range check
+                                date_mask = []
+                                for _, mrow in merged.iterrows():
+                                    mdate = parse_override_date(str(mrow.get("Date", "")))
+                                    match = (
+                                        str(mrow.get("EmployeeNumber", "")).strip() == str(ecn) and
+                                        mdate is not None and eff_start <= mdate <= eff_end
+                                    )
+                                    date_mask.append(match)
+
+                                if not any(date_mask):
+                                    continue
+
+                                for idx in merged[date_mask].index:
+                                    mdate = parse_override_date(str(merged.at[idx, "Date"]))
+                                    if mdate is None:
+                                        continue
+                                    day_name = mdate.strftime("%a")
+                                    if day_name in ov_row and day_name in DAY_COLS:
+                                        new_shift = normalize_schedule(ov_row[day_name])
+                                        merged.at[idx, day_name] = new_shift
+                                        merged.at[idx, "Shift"] = new_shift
+                                        if new_shift == "Rest Day":
+                                            merged.at[idx, "Is Scheduled"] = 0
+                                        else:
+                                            merged.at[idx, "Is Scheduled"] = 1
+
+                    # 2. Leave Override
+                    if "Leave" in xl.sheet_names:
+                        leave_ov = pd.read_excel(override_file, sheet_name="Leave")
+                        if {"ECN", "Date", "Leave"}.issubset(set(leave_ov.columns)):
+                            leave_ov["ECN"] = pd.to_numeric(leave_ov["ECN"], errors="coerce")
+                            leave_ov = leave_ov.dropna(subset=["ECN"])
+                            leave_ov["ECN"] = leave_ov["ECN"].astype(int)
+
+                            for _, ov_row in leave_ov.iterrows():
+                                ecn = int(ov_row["ECN"])
+                                ov_date = parse_override_date(ov_row.get("Date"))
+                                leave_flag = ov_row.get("Leave", 0)
+
+                                try:
+                                    leave_flag = int(float(leave_flag))
+                                except (ValueError, TypeError):
+                                    leave_flag = 0
+
+                                if ov_date is None or leave_flag != 1:
+                                    continue
+
+                                date_mask = []
+                                for _, mrow in merged.iterrows():
+                                    mdate = parse_override_date(str(mrow.get("Date", "")))
+                                    match = (
+                                        str(mrow.get("EmployeeNumber", "")).strip() == str(ecn) and
+                                        mdate is not None and mdate == ov_date
+                                    )
+                                    date_mask.append(match)
+
+                                if not any(date_mask):
+                                    continue
+
+                                for idx in merged[date_mask].index:
+                                    merged.at[idx, "Leave"] = 1
+                                    merged.at[idx, "Absent"] = 0
+                                    merged.at[idx, "Present"] = 0
+                                    merged.at[idx, "For Review"] = 0
+                                    # If they were "Not yet hired", clear that too
+                                    if merged.at[idx, "Shift"] == "Not yet hired":
+                                        day_name = ov_date.strftime("%a")
+                                        if day_name in merged.columns:
+                                            merged.at[idx, day_name] = "Leave"
+                                        merged.at[idx, "Shift"] = "Leave"
+
+                    # 3. Special Holidays
+                    if "Holidays" in xl.sheet_names:
+                        hol_ov = pd.read_excel(override_file, sheet_name="Holidays")
+                        if {"Client", "Date"}.issubset(set(hol_ov.columns)):
+                            for _, ov_row in hol_ov.iterrows():
+                                client = str(ov_row.get("Client", "")).strip().lower()
+                                subproc = str(ov_row.get("Sub-Process", "")).strip().lower()
+                                hol_date = parse_override_date(ov_row.get("Date"))
+
+                                if hol_date is None or not client:
+                                    continue
+
+                                date_mask = []
+                                for _, mrow in merged.iterrows():
+                                    mdate = parse_override_date(str(mrow.get("Date", "")))
+                                    m_client = str(mrow.get("Project", "")).strip().lower()
+                                    m_subproc = str(mrow.get("Sub-Process", "")).strip().lower()
+
+                                    client_match = (m_client == client)
+                                    subproc_match = (subproc == "" or m_subproc == subproc)
+                                    date_match = (mdate is not None and mdate == hol_date)
+
+                                    date_mask.append(client_match and subproc_match and date_match)
+
+                                if not any(date_mask):
+                                    continue
+
+                                for idx in merged[date_mask].index:
+                                    # Default holiday rule: not scheduled, not absent, not on leave
+                                    merged.at[idx, "Is Scheduled"] = 0
+                                    merged.at[idx, "Absent"] = 0
+                                    merged.at[idx, "Leave"] = 0
+                                    # BUT if they are Present (worked on holiday), mark as scheduled
+                                    if merged.at[idx, "Present"] == 1:
+                                        merged.at[idx, "Is Scheduled"] = 1
+                                    # Update shift display
+                                    if merged.at[idx, "Shift"] not in ("Not yet hired", "Leave"):
+                                        merged.at[idx, "Shift"] = "Holiday"
+                                        day_name = hol_date.strftime("%a")
+                                        if day_name in merged.columns:
+                                            merged.at[idx, day_name] = "Holiday"
+
+                st.success("✔ Overrides applied!")
 
             st.session_state.merged_headcount = merged
 
