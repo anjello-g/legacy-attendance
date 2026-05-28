@@ -76,6 +76,10 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
 # ── session state init ────────────────────────────────────────────────────────
 if "roster" not in st.session_state:
     st.session_state.roster = None   # enriched schedule+staff DataFrame
+if "attendance" not in st.session_state:
+    st.session_state.attendance = None # step 2 output
+if "headcount" not in st.session_state:
+    st.session_state.headcount = None # step 3 headcount file
 
 # ── constants ─────────────────────────────────────────────────────────────────
 EXCLUDED_LOCATIONS = {"clark", "dsi", "zamboanga", "isabela"}
@@ -192,9 +196,9 @@ def get_day_column(date_str: str) -> str:
 
 # ── UI header ─────────────────────────────────────────────────────────────────
 st.markdown("## 🗂️ Attendance Builder")
-st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave files against it.</p>', unsafe_allow_html=True)
+st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave files → Step 3: merge headcount data.</p>', unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Timesheet + Leave Attendance"])
+tab1, tab2, tab3 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Timesheet + Leave Attendance", "👤  Step 3 — Headcount Merge"])
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -560,6 +564,7 @@ with tab2:
                 st.stop()
 
             att_df = pd.DataFrame(all_records)
+            st.session_state.attendance = att_df
 
             # ── metrics ──────────────────────────────────────────────────────
             total_rows = len(att_df)
@@ -622,3 +627,150 @@ with tab2:
                 st.download_button("⬇️ Download as CSV",
                     att_df.to_csv(index=False).encode(),
                     csv_name, "text/csv", use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# STEP 3 — Headcount Merge (ECN ↔ EmployeeNumber)
+# ════════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.markdown("")
+
+    attendance = st.session_state.attendance
+
+    if attendance is None:
+        st.markdown("""
+        <div style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:12px;
+                    padding:2rem;text-align:center;color:#7c7f8e;margin-top:1rem;">
+            <div style="font-size:2.5rem;margin-bottom:0.5rem;">⏳</div>
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;
+                        color:#e8eaf0;margin-bottom:0.4rem;">Complete Step 2 first</div>
+            <div style="font-size:0.85rem;">
+                Build the attendance in <strong>Step 2</strong> before uploading the headcount file.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        step3_badge = '<span class="step-badge done">✔ Attendance loaded — upload headcount below</span>'
+        st.markdown(step3_badge, unsafe_allow_html=True)
+        st.markdown(f'<span style="color:#7c7f8e;font-size:0.82rem;">'
+                    f'{len(attendance):,} attendance rows · join key: EmployeeNumber → ECN</span>',
+                    unsafe_allow_html=True)
+
+        st.markdown("")
+        st.markdown('<div class="section-header">👤 Headcount File</div>', unsafe_allow_html=True)
+        hc_file = st.file_uploader(
+            "Upload headcount export (e.g. Knack RCM Headcount_05.13.2026.xlsx). "
+            "Must contain ECN column.",
+            type=["xlsx","xls"],
+            key="headcount", label_visibility="collapsed"
+        )
+
+        st.markdown("")
+        run_step3 = st.button("▶  Merge Headcount", key="btn_step3")
+
+        if run_step3:
+            if not hc_file:
+                st.warning("Upload the headcount file first.", icon="⚠️")
+                st.stop()
+
+            with st.spinner("Reading headcount file…"):
+                hc_df = pd.read_excel(hc_file, sheet_name=0)
+
+            # Validate required columns
+            required_hc = {"ECN", "Employee", "Project", "Sub-Process", "Supervisor",
+                           "Role", "Manager", "DOJ Knack", "Date of Separation",
+                           "Billable/Buffer", "Active/Inactive"}
+            missing_hc = required_hc - set(hc_df.columns)
+            if missing_hc:
+                st.error(f"Headcount file missing required columns: {missing_hc}")
+                st.stop()
+
+            # Ensure ECN is numeric for clean merge
+            hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce")
+            hc_df = hc_df.dropna(subset=["ECN"])
+            hc_df["ECN"] = hc_df["ECN"].astype(int)
+
+            # Prepare attendance EmployeeNumber for merge
+            att_merge = attendance.copy()
+            att_merge["_merge_key"] = pd.to_numeric(att_merge["EmployeeNumber"], errors="coerce")
+            att_merge = att_merge.dropna(subset=["_merge_key"])
+            att_merge["_merge_key"] = att_merge["_merge_key"].astype(int)
+
+            # Select only the columns we want from headcount
+            hc_cols = ["ECN", "Employee", "Project", "Sub-Process", "Supervisor",
+                       "Role", "Manager", "DOJ Knack", "Date of Separation",
+                       "Billable/Buffer", "Active/Inactive"]
+            hc_subset = hc_df[hc_cols].copy()
+
+            # Merge: attendance.EmployeeNumber == headcount.ECN
+            merged = att_merge.merge(
+                hc_subset,
+                left_on="_merge_key",
+                right_on="ECN",
+                how="left"
+            )
+
+            # Drop helper column
+            merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
+
+            # Track match status
+            merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
+
+            st.session_state.headcount = merged
+
+            # ── metrics ──────────────────────────────────────────────────────
+            total_m    = len(merged)
+            matched_n  = (merged["HeadcountMatch"] == "✅ Matched").sum()
+            unmatched_n = (merged["HeadcountMatch"] == "❌ Unmatched").sum()
+
+            st.markdown("---")
+            mm1, mm2, mm3 = st.columns(3)
+            for col, val, lbl, cls in [
+                (mm1, total_m,     "Total Rows",      ""),
+                (mm2, matched_n,   "Matched",         "matched"),
+                (mm3, unmatched_n, "Unmatched",        "unmatched"),
+            ]:
+                with col:
+                    st.markdown(
+                        f'<div class="metric-card"><div class="metric-val {cls}">{val:,}</div>'
+                        f'<div class="metric-lbl">{lbl}</div></div>',
+                        unsafe_allow_html=True
+                    )
+
+            st.markdown("")
+            st.success("✔ Headcount merged! Review and download below.")
+
+            # Display columns: original attendance + new headcount columns
+            display_cols = (["Date", "Name", "CSLoginName", "EmployeeNumber",
+                            "OnSiteLocation", "Is Scheduled",
+                            "Present", "Absent", "Leave", "For Review",
+                            "Employee", "Project", "Sub-Process", "Supervisor",
+                            "Role", "Manager", "DOJ Knack", "Date of Separation",
+                            "Billable/Buffer", "Active/Inactive",
+                            "HeadcountMatch"] + DAY_COLS)
+            display_cols = [c for c in display_cols if c in merged.columns]
+
+            # Tabs for matched vs unmatched
+            t_all, t_matched, t_unmatched = st.tabs(
+                ["All Records", "✅ Matched", "❌ Unmatched"]
+            )
+            with t_all:
+                st.dataframe(merged[display_cols], use_container_width=True, height=420)
+            with t_matched:
+                st.dataframe(merged[merged["HeadcountMatch"] == "✅ Matched"][display_cols],
+                             use_container_width=True, height=420)
+            with t_unmatched:
+                st.dataframe(merged[merged["HeadcountMatch"] == "❌ Unmatched"][display_cols],
+                             use_container_width=True, height=420)
+
+            st.markdown("---")
+            md1, md2 = st.columns([2,1])
+            with md1:
+                st.download_button("⬇️ Download Final as Excel",
+                    to_excel_bytes(merged), "final_attendance.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+            with md2:
+                st.download_button("⬇️ Download as CSV",
+                    merged.to_csv(index=False).encode(),
+                    "final_attendance.csv", "text/csv", use_container_width=True)
