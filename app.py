@@ -3,7 +3,8 @@ import pandas as pd
 import re
 from io import BytesIO
 from difflib import SequenceMatcher
-from datetime import datetime
+from datetime import datetime, time, date
+import dateutil.parser  # robust date/time parsing
 
 st.set_page_config(
     page_title="Attendance Builder",
@@ -75,11 +76,11 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
 
 # ── session state init ────────────────────────────────────────────────────────
 if "roster" not in st.session_state:
-    st.session_state.roster = None   # enriched schedule+staff DataFrame
+    st.session_state.roster = None
 if "attendance" not in st.session_state:
-    st.session_state.attendance = None # step 2 output
+    st.session_state.attendance = None
 if "merged_headcount" not in st.session_state:
-    st.session_state.merged_headcount = None # step 3 result
+    st.session_state.merged_headcount = None
 
 # ── constants ─────────────────────────────────────────────────────────────────
 EXCLUDED_LOCATIONS = {"clark", "dsi", "zamboanga", "isabela"}
@@ -155,25 +156,18 @@ def read_leave_file(file) -> pd.DataFrame:
     return df
 
 def attendance_status(first_login, active) -> str:
-    """
-    Present     : has First Login AND Active >= 0.1
-    For Review  : has First Login but Active < 0.1
-                  OR no First Login but Active > 0
-    blank       : no First Login and no Active (leave blank)
-    """
     has_login  = pd.notna(first_login) and str(first_login).strip() not in ("", "NaT")
     try:
         active_val = float(active) if pd.notna(active) else 0.0
     except (ValueError, TypeError):
         active_val = 0.0
-
     if has_login and active_val >= 0.1:
         return "Present"
     if has_login and active_val < 0.1:
         return "For Review"
     if not has_login and active_val > 0:
         return "For Review"
-    return ""   # no login, no active → leave blank
+    return ""
 
 def parse_date_str(date_str: str):
     """Try common formats; return datetime or None."""
@@ -184,28 +178,63 @@ def parse_date_str(date_str: str):
             continue
     return None
 
-
 def get_day_column(date_str: str) -> str:
-    """Map a date string to its 3-letter day column name."""
     dt = parse_date_str(date_str)
     if dt is None:
         return None
-    # strftime %a gives Mon, Tue, Wed, Thu, Fri, Sat, Sun
     return dt.strftime("%a")
 
-
 def clean_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert problematic columns to strings to avoid Arrow serialization errors."""
     df = df.copy()
     for col in df.columns:
-        # Convert object columns with mixed types to string
         if df[col].dtype == 'object':
             df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
-        # Convert nullable Int64 etc to regular int or object
         elif pd.api.types.is_integer_dtype(df[col]) and df[col].isna().any():
             df[col] = df[col].astype('Int64').astype(str).replace('<NA>', '')
     return df
 
+# ── new helpers for shift & late calculation ───────────────────────────────────
+def parse_shift_start(shift_str: str) -> time:
+    """Extract start time from '0900 - 1800' format. Returns time object or None."""
+    if pd.isna(shift_str) or shift_str == "Rest Day":
+        return None
+    parts = shift_str.strip().split("-")
+    if len(parts) < 2:
+        return None
+    start_str = parts[0].strip()
+    # expect HHMM
+    if len(start_str) == 4 and start_str.isdigit():
+        hour = int(start_str[:2])
+        minute = int(start_str[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour, minute)
+    return None
+
+def safe_parse_datetime(value):
+    """Convert a value (string, datetime, etc.) to datetime. Returns None if impossible."""
+    if pd.isna(value) or str(value).strip() in ("", "NaT"):
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return dateutil.parser.parse(str(value))
+    except:
+        return None
+
+def compute_late(shift_start: time, first_login_dt, date_obj: date) -> tuple[int, float]:
+    """
+    Returns (Late flag 0/1, late_minutes decimal).
+    If first_login is after shift_start, returns 1 and minutes late.
+    Otherwise returns 0, 0.0.
+    """
+    if shift_start is None or first_login_dt is None or date_obj is None:
+        return 0, 0.0
+    # Combine date with shift start time
+    threshold = datetime.combine(date_obj, shift_start)
+    diff = (first_login_dt - threshold).total_seconds() / 60.0
+    if diff > 0:
+        return 1, round(diff, 2)
+    return 0, 0.0
 
 # ── UI header ─────────────────────────────────────────────────────────────────
 st.markdown("## 🗂️ Attendance Builder")
@@ -377,7 +406,6 @@ with tab2:
                     f'{len(roster):,} roster rows · join key: CSLoginName</span>',
                     unsafe_allow_html=True)
 
-        # Build CSLoginName lookup from roster (lowercase → roster row index list)
         cs_lookup: dict[str, list[int]] = {}
         for idx, row in roster.iterrows():
             cs = str(row.get("CSLoginName","") or "").strip().lower()
@@ -408,7 +436,6 @@ with tab2:
                 st.warning("Upload at least one timesheet file.", icon="⚠️")
                 st.stop()
 
-            # ── index leave files by date ────────────────────────────────────
             leave_by_date: dict[str, pd.DataFrame] = {}
             if leave_files:
                 for lf in leave_files:
@@ -433,14 +460,12 @@ with tab2:
                     errors.append(f"**{ts_file.name}**: {e}")
                     continue
 
-                # Build a lookup: CSLoginName (agent email) → timesheet row
                 ts_by_cs: dict[str, dict] = {}
                 for _, ts_row in ts_df.iterrows():
                     agent_email = str(ts_row.get("Agent Email","")).strip().lower()
                     if agent_email:
                         ts_by_cs[agent_email] = ts_row.to_dict()
 
-                # Build leave lookup for this date (match by normalized Name)
                 leave_lookup: dict[str, dict] = {}
                 leave_df = leave_by_date.get(date_str)
                 if leave_df is not None:
@@ -449,10 +474,10 @@ with tab2:
                         if name:
                             leave_lookup[normalize(name)] = lrow.to_dict()
 
-                # Determine which day column applies for this date
                 day_col = get_day_column(date_str)
+                parsed_date = parse_date_str(date_str)  # used for late calculation
+                date_obj = parsed_date.date() if parsed_date else None
 
-                # Iterate over every roster row and join timesheet + leave data
                 for _, r_row in roster.iterrows():
                     cs_key = str(r_row.get("CSLoginName","") or "").strip().lower()
                     ts_row = ts_by_cs.get(cs_key)
@@ -467,27 +492,31 @@ with tab2:
                         "Position":      r_row.get("Position",""),
                     }
 
-                    # Day schedule columns
                     for day in DAY_COLS:
                         if day in r_row:
                             out[day] = r_row[day]
 
-                    # ── Is Scheduled ───────────────────────────────────────
-                    # Using the Date, determine the day-of-week column.
-                    # If that column is not "Rest Day", mark 1, else 0.
+                    # Is Scheduled
                     is_scheduled = 0
+                    shift_str = "Rest Day"
                     if day_col and day_col in r_row:
-                        is_scheduled = 1 if str(r_row[day_col]).strip() != "Rest Day" else 0
+                        shift_str = normalize_schedule(r_row[day_col])
+                        if shift_str != "Rest Day":
+                            is_scheduled = 1
                     out["Is Scheduled"] = is_scheduled
 
-                    # ── timesheet fields ─────────────────────────────────────
-                    first_login = None
-                    active      = None
+                    # Day & Shift columns
+                    out["Day"] = day_col if day_col else ""
+                    out["Shift"] = shift_str if shift_str else ""
+
+                    # Timesheet fields
+                    first_login_raw = None
+                    active = None
                     if ts_row is not None:
-                        first_login = ts_row.get("First Login")
+                        first_login_raw = ts_row.get("First Login")
                         active      = ts_row.get("Active")
                         out["AgentEmail"]  = ts_row.get("Agent Email","")
-                        out["FirstLogin"]  = first_login
+                        out["FirstLogin"]  = first_login_raw
                         out["LastLogout"]  = ts_row.get("Last Logout","")
                         out["Active"]      = active
                         out["Break"]       = ts_row.get("Break","")
@@ -498,18 +527,15 @@ with tab2:
                         out["Active"]      = ""
                         out["Break"]       = ""
 
-                    # ── determine timesheet status ─────────────────────────
                     ts_status = ""
                     if ts_row is not None:
-                        ts_status = attendance_status(first_login, active)
+                        ts_status = attendance_status(first_login_raw, active)
 
-                    # ── determine leave status ─────────────────────────────
+                    # Leave detection
                     leave_status = None
                     norm_name = normalize(str(r_row.get("Name", "")))
                     leave_row = leave_lookup.get(norm_name)
-
                     if leave_row is None:
-                        # fuzzy fallback
                         best_score, best_key = 0.0, None
                         for key in leave_lookup:
                             sc = SequenceMatcher(None, norm_name, key).ratio()
@@ -519,7 +545,6 @@ with tab2:
                             leave_row = leave_lookup[best_key]
 
                     if leave_row is not None:
-                        # SL / UPL → Absent
                         for col in ["SL", "UPL"]:
                             val = leave_row.get(col, 0)
                             if pd.notna(val):
@@ -531,7 +556,6 @@ with tab2:
                                     if str(val).strip().lower() in ("1", "yes", "true", "y"):
                                         leave_status = "Absent"
                                         break
-                        # Other leave types → Leave
                         if leave_status is None:
                             for col in ["VL", "ML", "BL", "SPL", "PL", "MWL", "BDL"]:
                                 val = leave_row.get(col, 0)
@@ -545,7 +569,6 @@ with tab2:
                                             leave_status = "Leave"
                                             break
 
-                    # ── apply priority: Present → For Review → Leave → Absent
                     present    = 1 if ts_status == "Present"     else 0
                     for_review = 1 if ts_status == "For Review"  else 0
                     leave      = 0
@@ -558,13 +581,19 @@ with tab2:
                     elif leave_status == "Leave":
                         leave = 1
                     else:
-                        # Covers: SL/UPL leave, no leave, no timesheet
                         absent = 1
 
                     out["Present"]    = present
                     out["For Review"] = for_review
                     out["Leave"]      = leave
                     out["Absent"]     = absent
+
+                    # ── Late calculation ─────────────────────────────────────
+                    shift_start_time = parse_shift_start(shift_str)  # shift from schedule
+                    first_login_dt = safe_parse_datetime(first_login_raw) if ts_row else None
+                    late_flag, late_minutes = compute_late(shift_start_time, first_login_dt, date_obj)
+                    out["Late"] = late_flag
+                    out["Late Minutes"] = late_minutes
 
                     all_records.append(out)
 
@@ -579,7 +608,6 @@ with tab2:
             att_df = pd.DataFrame(all_records)
             st.session_state.attendance = att_df
 
-            # ── metrics ──────────────────────────────────────────────────────
             total_rows = len(att_df)
             present_n  = att_df["Present"].sum()
             review_n   = att_df["For Review"].sum()
@@ -603,11 +631,10 @@ with tab2:
                     )
 
             st.markdown("")
-
             disp = (["Date","Name","CSLoginName","EmployeeNumber","OnSiteLocation",
-                     "Is Scheduled","Present","Absent","Leave","For Review",
+                     "Day","Shift","Is Scheduled","Present","Absent","Leave","For Review",
                      "FirstLogin","LastLogout","Active","Break",
-                     "HireStatus","Position"] + DAY_COLS)
+                     "Late","Late Minutes","HireStatus","Position"] + DAY_COLS)
             disp = [c for c in disp if c in att_df.columns]
 
             ta_all, ta_present, ta_review, ta_leave, ta_absent = st.tabs(
@@ -689,7 +716,6 @@ with tab3:
             with st.spinner("Reading headcount file…"):
                 hc_df = pd.read_excel(hc_file, sheet_name=0)
 
-            # Validate required columns
             required_hc = {"ECN", "Employee", "Project", "Sub-Process", "Supervisor",
                            "Role", "Manager", "DOJ Knack", "Date of Separation",
                            "Billable/Buffer", "Active/Inactive"}
@@ -698,24 +724,20 @@ with tab3:
                 st.error(f"Headcount file missing required columns: {missing_hc}")
                 st.stop()
 
-            # Ensure ECN is numeric for clean merge
             hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce")
             hc_df = hc_df.dropna(subset=["ECN"])
             hc_df["ECN"] = hc_df["ECN"].astype(int)
 
-            # Prepare attendance EmployeeNumber for merge
             att_merge = attendance.copy()
             att_merge["_merge_key"] = pd.to_numeric(att_merge["EmployeeNumber"], errors="coerce")
             att_merge = att_merge.dropna(subset=["_merge_key"])
             att_merge["_merge_key"] = att_merge["_merge_key"].astype(int)
 
-            # Select only the columns we want from headcount
             hc_cols = ["ECN", "Employee", "Project", "Sub-Process", "Supervisor",
                        "Role", "Manager", "DOJ Knack", "Date of Separation",
                        "Billable/Buffer", "Active/Inactive"]
             hc_subset = hc_df[hc_cols].copy()
 
-            # Merge: attendance.EmployeeNumber == headcount.ECN
             merged = att_merge.merge(
                 hc_subset,
                 left_on="_merge_key",
@@ -723,15 +745,22 @@ with tab3:
                 how="left"
             )
 
-            # Drop helper column
             merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
-
-            # Track match status
             merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
+
+            # ── separation date rule ─────────────────────────────────────────
+            # If Date of Separation is present (not null/blank), set Absent & Is Scheduled to 0
+            sep_col = "Date of Separation"
+            if sep_col in merged.columns:
+                # Convert to string to catch empty strings; also handle datetime NaT
+                has_sep = merged[sep_col].apply(
+                    lambda x: pd.notna(x) and str(x).strip() != "" and str(x).strip().lower() != "nat"
+                )
+                merged.loc[has_sep, "Absent"] = 0
+                merged.loc[has_sep, "Is Scheduled"] = 0
 
             st.session_state.merged_headcount = merged
 
-            # ── metrics ──────────────────────────────────────────────────────
             total_m    = len(merged)
             matched_n  = (merged["HeadcountMatch"] == "✅ Matched").sum()
             unmatched_n = (merged["HeadcountMatch"] == "❌ Unmatched").sum()
@@ -753,17 +782,17 @@ with tab3:
             st.markdown("")
             st.success("✔ Headcount merged! Review and download below.")
 
-            # Display columns: original attendance + new headcount columns
             display_cols = (["Date", "Name", "CSLoginName", "EmployeeNumber",
-                            "OnSiteLocation", "Is Scheduled",
+                            "OnSiteLocation", "Day","Shift","Is Scheduled",
                             "Present", "Absent", "Leave", "For Review",
+                            "FirstLogin","LastLogout","Active","Break",
+                            "Late","Late Minutes",
                             "Employee", "Project", "Sub-Process", "Supervisor",
                             "Role", "Manager", "DOJ Knack", "Date of Separation",
                             "Billable/Buffer", "Active/Inactive",
                             "HeadcountMatch"] + DAY_COLS)
             display_cols = [c for c in display_cols if c in merged.columns]
 
-            # Tabs for matched vs unmatched
             t_all, t_matched, t_unmatched = st.tabs(
                 ["All Records", "✅ Matched", "❌ Unmatched"]
             )
