@@ -343,6 +343,46 @@ def build_override_template() -> bytes:
     ws3.column_dimensions['B'].width = 20
     ws3.column_dimensions['C'].width = 16
 
+    # ── Sheet 4: Exemptions ───────────────────────────────────────────
+    ws4 = wb.create_sheet(title="Exemptions")
+    exempt_headers = ["ECN", "Exemption Date", "Effective Until", "Active/Inactive"]
+    ws4.append(exempt_headers)
+    for col in range(1, len(exempt_headers) + 1):
+        cell = ws4.cell(row=1, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+    ws4.append([12345, "05-10-2026", "05-20-2026", "Inactive"])
+    ws4.append([67890, "05-15-2026", "05-25-2026", "Inactive"])
+    for row in ws4.iter_rows(min_row=2, max_row=ws4.max_row):
+        for cell in row:
+            cell.border = thin_border
+    ws4.column_dimensions['A'].width = 12
+    ws4.column_dimensions['B'].width = 18
+    ws4.column_dimensions['C'].width = 18
+    ws4.column_dimensions['D'].width = 18
+
+    # ── Sheet 4: Exemptions ────────────────────────────────────────────
+    ws4 = wb.create_sheet(title="Exemptions")
+    exemp_headers = ["ECN", "Effective Date", "Effective Until", "Status"]
+    ws4.append(exemp_headers)
+    for col in range(1, len(exemp_headers) + 1):
+        cell = ws4.cell(row=1, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+    ws4.append([12345, "05-01-2026", "05-15-2026", "RTWO"])
+    ws4.append([67890, "05-20-2026", "05-25-2026", "Pending Deactivation"])
+    for row in ws4.iter_rows(min_row=2, max_row=ws4.max_row):
+        for cell in row:
+            cell.border = thin_border
+    ws4.column_dimensions['A'].width = 12
+    ws4.column_dimensions['B'].width = 16
+    ws4.column_dimensions['C'].width = 16
+    ws4.column_dimensions['D'].width = 22
+
     wb.save(buf)
     return buf.getvalue()
 
@@ -906,10 +946,12 @@ with tab3:
         st.markdown('<div class="section-header">📋 Override File (Optional)</div>', unsafe_allow_html=True)
         st.markdown(
             '<span style="color:#7c7f8e;font-size:0.82rem;">'
-            'Upload an Excel file with 3 sheets: <strong>Schedule</strong>, <strong>Leave</strong>, <strong>Holidays</strong>. '
-            'These manually override shifts, leave status, and holiday rules.<br>'
+            'Upload an Excel file with 4 sheets: <strong>Schedule</strong>, <strong>Leave</strong>, '
+            '<strong>Holidays</strong>, <strong>Exemptions</strong>. '
+            'These manually override shifts, leave status, holiday rules, and HR status.<br>'
             '<strong>Holidays</strong> sheet uses <strong>Project</strong> (matches headcount Project column). '
-            'Leave Sub-Process blank to apply to all sub-processes.</span>',
+            'Leave Sub-Process blank to apply to all sub-processes.<br>'
+            '<strong>Exemptions</strong> sheet overrides Active/Inactive and zeros out Schedule/Absent.</span>',
             unsafe_allow_html=True
         )
         override_file = st.file_uploader(
@@ -987,6 +1029,32 @@ with tab3:
                 )
                 merged.loc[has_sep, "Absent"] = 0
                 merged.loc[has_sep, "Is Scheduled"] = 0
+
+            # ── Maternity / Suspended Active/Inactive rule ────────────────────
+            # If Role contains "Maternity" or "Suspended":
+            #   - Has login (Active > 0.1): Scheduled=1, Present=1, Absent=0, Leave=0, Active/Inactive=Active
+            #   - No login or Active <= 0.1: Scheduled=0, Absent=0, Leave=0 (even with plotted leave)
+            if "Role" in merged.columns:
+                role_lower = merged["Role"].astype(str).str.lower()
+                is_mat_or_susp = role_lower.str.contains("maternity|suspended", case=False, na=False)
+
+                # Has meaningful login
+                has_login = merged["Present"] == 1
+                mat_susp_with_login = is_mat_or_susp & has_login
+                merged.loc[mat_susp_with_login, "Is Scheduled"] = 1
+                merged.loc[mat_susp_with_login, "Present"] = 1
+                merged.loc[mat_susp_with_login, "Absent"] = 0
+                merged.loc[mat_susp_with_login, "Leave"] = 0
+                if "Active/Inactive" in merged.columns:
+                    merged.loc[mat_susp_with_login, "Active/Inactive"] = "Active"
+
+                # No meaningful login
+                no_login = merged["Present"] == 0
+                mat_susp_no_login = is_mat_or_susp & no_login
+                merged.loc[mat_susp_no_login, "Is Scheduled"] = 0
+                merged.loc[mat_susp_no_login, "Absent"] = 0
+                merged.loc[mat_susp_no_login, "Leave"] = 0
+                # Active/Inactive is NOT changed here
 
             # ── DOJ Knack re-check after merge ────────────────────────────────
             if "DOJ Knack" in merged.columns:
@@ -1156,6 +1224,71 @@ with tab3:
                                             merged.at[idx, day_name] = "Holiday"
 
                 st.success("✔ Overrides applied!")
+
+            # ── Exemptions processing ──────────────────────────────────────────
+            if override_file is not None and "Exemptions" in xl.sheet_names:
+                exemp_ov = pd.read_excel(override_file, sheet_name="Exemptions")
+                if {"ECN", "Effective Date", "Effective Until", "Status"}.issubset(set(exemp_ov.columns)):
+                    exemp_ov["ECN"] = pd.to_numeric(exemp_ov["ECN"], errors="coerce")
+                    exemp_ov = exemp_ov.dropna(subset=["ECN"])
+                    exemp_ov["ECN"] = exemp_ov["ECN"].astype(int)
+
+                    for _, ov_row in exemp_ov.iterrows():
+                        ecn = int(ov_row["ECN"])
+                        eff_start = parse_override_date(ov_row.get("Effective Date"))
+                        eff_end = parse_override_date(ov_row.get("Effective Until"))
+                        status = str(ov_row.get("Status", "")).strip()
+
+                        if eff_start is None or eff_end is None:
+                            continue
+
+                        date_mask = []
+                        for _, mrow in merged.iterrows():
+                            mdate = parse_override_date(str(mrow.get("Date", "")))
+                            match = (
+                                str(mrow.get("EmployeeNumber", "")).strip() == str(ecn) and
+                                mdate is not None and eff_start <= mdate <= eff_end
+                            )
+                            date_mask.append(match)
+
+                        if not any(date_mask):
+                            continue
+
+                        for idx in merged[date_mask].index:
+                            merged.at[idx, "Is Scheduled"] = 0
+                            merged.at[idx, "Absent"] = 0
+                            if status and "Active/Inactive" in merged.columns:
+                                merged.at[idx, "Active/Inactive"] = status
+
+            # ── Maternity / Suspended logic ────────────────────────────────────
+            if "Active/Inactive" in merged.columns:
+                mat_susp_mask = merged["Active/Inactive"].astype(str).str.strip().str.lower().isin(["maternity", "suspended"])
+
+                for idx in merged[mat_susp_mask].index:
+                    row = merged.loc[idx]
+                    active_val = row.get("Active", 0)
+                    first_login = row.get("FirstLogin", "")
+
+                    try:
+                        active_float = float(active_val) if pd.notna(active_val) else 0.0
+                    except (ValueError, TypeError):
+                        active_float = 0.0
+
+                    has_login = pd.notna(first_login) and str(first_login).strip() not in ("", "NaT")
+
+                    if has_login and active_float > 0.1:
+                        # Has login and active > 0.1
+                        merged.at[idx, "Is Scheduled"] = 1
+                        merged.at[idx, "Present"] = 1
+                        merged.at[idx, "Absent"] = 0
+                        merged.at[idx, "Leave"] = 0
+                        merged.at[idx, "Active/Inactive"] = "Active"
+                    else:
+                        # No login or active <= 0.1
+                        merged.at[idx, "Is Scheduled"] = 0
+                        merged.at[idx, "Absent"] = 0
+                        merged.at[idx, "Leave"] = 0
+                        # Don't change Active/Inactive
 
             # ── Final consistency rules ────────────────────────────────────────
             # Rule 1: If not scheduled, cannot be Absent or on Leave
