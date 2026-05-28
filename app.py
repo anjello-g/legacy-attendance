@@ -751,7 +751,14 @@ with tab2:
                     elif present == 1:
                         pass
                     elif for_review == 1:
-                        absent = 1  # For Review → mark as Absent
+                        if shift_str == "Rest Day":
+                            # Rest day with low activity: For Review only, not Absent, not scheduled
+                            absent = 0
+                            is_scheduled = 0
+                        else:
+                            # Working day with low activity: For Review + Absent + Scheduled
+                            absent = 1
+                            is_scheduled = 1
                     elif leave_status == "Leave":
                         leave = 1
                         absent = 0  # Leave takes priority over Absent
@@ -1160,8 +1167,8 @@ with tab3:
             present_but_not_scheduled = (merged["Is Scheduled"] == 0) & (merged["Present"] == 1)
             merged.loc[present_but_not_scheduled, "Is Scheduled"] = 1
 
-            # Rule 3: For Review → Absent = 1
-            for_review_mask = merged["For Review"] == 1
+            # Rule 3: For Review → Absent = 1 (only when actually scheduled / not Rest Day)
+            for_review_mask = (merged["For Review"] == 1) & (merged["Is Scheduled"] == 1)
             merged.loc[for_review_mask, "Absent"] = 1
 
             # Rule 4: Leave = 1 → Absent = 0 (Leave takes priority)
