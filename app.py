@@ -325,7 +325,7 @@ def build_override_template() -> bytes:
 
     # ── Sheet 3: Holidays ─────────────────────────────────────────────
     ws3 = wb.create_sheet(title="Holidays")
-    holiday_headers = ["Client", "Sub-Process", "Date"]
+    holiday_headers = ["Project", "Sub-Process", "Date"]
     ws3.append(holiday_headers)
     for col in range(1, len(holiday_headers) + 1):
         cell = ws3.cell(row=1, column=col)
@@ -751,9 +751,10 @@ with tab2:
                     elif present == 1:
                         pass
                     elif for_review == 1:
-                        pass
+                        absent = 1  # For Review → mark as Absent
                     elif leave_status == "Leave":
                         leave = 1
+                        absent = 0  # Leave takes priority over Absent
                     else:
                         absent = 1
 
@@ -899,7 +900,9 @@ with tab3:
         st.markdown(
             '<span style="color:#7c7f8e;font-size:0.82rem;">'
             'Upload an Excel file with 3 sheets: <strong>Schedule</strong>, <strong>Leave</strong>, <strong>Holidays</strong>. '
-            'These manually override shifts, leave status, and holiday rules.</span>',
+            'These manually override shifts, leave status, and holiday rules.<br>'
+            '<strong>Holidays</strong> sheet uses <strong>Project</strong> (matches headcount Project column). '
+            'Leave Sub-Process blank to apply to all sub-processes.</span>',
             unsafe_allow_html=True
         )
         override_file = st.file_uploader(
@@ -1106,26 +1109,26 @@ with tab3:
                     # 3. Special Holidays
                     if "Holidays" in xl.sheet_names:
                         hol_ov = pd.read_excel(override_file, sheet_name="Holidays")
-                        if {"Client", "Date"}.issubset(set(hol_ov.columns)):
+                        if {"Project", "Date"}.issubset(set(hol_ov.columns)):
                             for _, ov_row in hol_ov.iterrows():
-                                client = str(ov_row.get("Client", "")).strip().lower()
+                                proj = str(ov_row.get("Project", "")).strip().lower()
                                 subproc = str(ov_row.get("Sub-Process", "")).strip().lower()
                                 hol_date = parse_override_date(ov_row.get("Date"))
 
-                                if hol_date is None or not client:
+                                if hol_date is None or not proj:
                                     continue
 
                                 date_mask = []
                                 for _, mrow in merged.iterrows():
                                     mdate = parse_override_date(str(mrow.get("Date", "")))
-                                    m_client = str(mrow.get("Project", "")).strip().lower()
+                                    m_proj = str(mrow.get("Project", "")).strip().lower()
                                     m_subproc = str(mrow.get("Sub-Process", "")).strip().lower()
 
-                                    client_match = (m_client == client)
+                                    proj_match = (m_proj == proj)
                                     subproc_match = (subproc == "" or m_subproc == subproc)
                                     date_match = (mdate is not None and mdate == hol_date)
 
-                                    date_mask.append(client_match and subproc_match and date_match)
+                                    date_mask.append(proj_match and subproc_match and date_match)
 
                                 if not any(date_mask):
                                     continue
@@ -1156,6 +1159,14 @@ with tab3:
             # Rule 2: If not scheduled but Present, they were effectively scheduled
             present_but_not_scheduled = (merged["Is Scheduled"] == 0) & (merged["Present"] == 1)
             merged.loc[present_but_not_scheduled, "Is Scheduled"] = 1
+
+            # Rule 3: For Review → Absent = 1
+            for_review_mask = merged["For Review"] == 1
+            merged.loc[for_review_mask, "Absent"] = 1
+
+            # Rule 4: Leave = 1 → Absent = 0 (Leave takes priority)
+            leave_mask = merged["Leave"] == 1
+            merged.loc[leave_mask, "Absent"] = 0
 
             st.session_state.merged_headcount = merged
 
