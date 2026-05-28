@@ -249,6 +249,15 @@ def parse_doj_knack(value) -> date:
         return dt.date() if hasattr(dt, 'date') else dt
     return None
 
+# ── Filename date normalizer ──────────────────────────────────────────────────
+def normalize_filename_date(filename: str) -> str:
+    """Parse a date from a filename (e.g. '5-1-2026.xlsx') and return YYYY-MM-DD string."""
+    base = filename.replace(".xlsx", "").replace(".xls", "").strip()
+    dt = parse_date_str(base)
+    if dt is not None:
+        return dt.strftime("%Y-%m-%d")
+    return base  # fallback to raw string if unparseable
+
 # ── Override date helper ──────────────────────────────────────────────────────
 def parse_override_date(value) -> date:
     """Parse an override file date value. Returns None if unparseable."""
@@ -625,7 +634,7 @@ with tab2:
             leave_by_date: dict[str, pd.DataFrame] = {}
             if leave_files:
                 for lf in leave_files:
-                    ldate = lf.name.replace(".xlsx","").replace(".xls","")
+                    ldate = normalize_filename_date(lf.name)
                     try:
                         leave_by_date[ldate] = read_leave_file(lf)
                     except Exception as e:
@@ -636,12 +645,13 @@ with tab2:
             output_filename = "attendance.xlsx"
 
             for i, ts_file in enumerate(ts_files):
-                date_str = ts_file.name.replace(".xlsx","").replace(".xls","")
+                date_str_raw = ts_file.name.replace(".xlsx","").replace(".xls","")
+                date_str = normalize_filename_date(ts_file.name)  # normalized YYYY-MM-DD for matching
                 if i == 0:
-                    output_filename = f"{date_str}.xlsx"
+                    output_filename = f"{date_str_raw}.xlsx"
 
                 # Parse the attendance date for DOJ comparison
-                parsed_date = parse_date_str(date_str)
+                parsed_date = parse_date_str(date_str_raw)
                 date_obj = parsed_date.date() if parsed_date else None
 
                 try:
@@ -660,9 +670,18 @@ with tab2:
                 leave_df = leave_by_date.get(date_str)
                 if leave_df is not None:
                     for _, lrow in leave_df.iterrows():
-                        name = str(lrow.get("name", lrow.get("Name", ""))).strip()
+                        # Try multiple possible name columns with aggressive cleaning
+                        name = ""
+                        for col in ["Name", "name", "Employee Name", "EmployeeName", "Full Name", "FullName"]:
+                            if col in lrow and pd.notna(lrow[col]):
+                                name = str(lrow[col]).strip()
+                                if name:
+                                    break
                         if name:
-                            leave_lookup[normalize(name)] = lrow.to_dict()
+                            # Extra-aggressive normalization: collapse all whitespace, lowercase, remove non-alpha
+                            clean_name = re.sub(r"\s+", " ", name.lower().strip())
+                            clean_name = re.sub(r"[^a-z\s]", "", clean_name)
+                            leave_lookup[clean_name] = lrow.to_dict()
 
                 day_col = get_day_column(date_str)
 
@@ -741,7 +760,10 @@ with tab2:
 
                     # Leave detection
                     leave_status = None
-                    norm_name = normalize(str(r_row.get("Name", "")))
+                    # Use the same aggressive normalization as the leave file
+                    roster_name = str(r_row.get("Name", ""))
+                    norm_name = re.sub(r"\s+", " ", roster_name.lower().strip())
+                    norm_name = re.sub(r"[^a-z\s]", "", norm_name)
                     leave_row = leave_lookup.get(norm_name)
                     if leave_row is None:
                         best_score, best_key = 0.0, None
