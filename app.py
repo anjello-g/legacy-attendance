@@ -3,6 +3,7 @@ import pandas as pd
 import re
 from io import BytesIO
 from difflib import SequenceMatcher
+from datetime import datetime
 
 st.set_page_config(
     page_title="Attendance Builder",
@@ -170,6 +171,24 @@ def attendance_status(first_login, active) -> str:
         return "For Review"
     return ""   # no login, no active → leave blank
 
+def parse_date_str(date_str: str):
+    """Try common formats; return datetime or None."""
+    for fmt in ("%m-%d-%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def get_day_column(date_str: str) -> str:
+    """Map a date string to its 3-letter day column name."""
+    dt = parse_date_str(date_str)
+    if dt is None:
+        return None
+    # strftime %a gives Mon, Tue, Wed, Thu, Fri, Sat, Sun
+    return dt.strftime("%a")
+
 
 # ── UI header ─────────────────────────────────────────────────────────────────
 st.markdown("## 🗂️ Attendance Builder")
@@ -306,7 +325,7 @@ with tab1:
             <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;
                         color:#e8eaf0;margin-bottom:0.4rem;">Upload Schedule + Staff to build the roster</div>
             <div style="font-size:0.85rem;">
-                Enriches each schedule row with <strong style="color:#4ade80">CSLoginName · EmployeeNumber · OnSiteLocation</strong>.<<br>
+                Enriches each schedule row with <strong style="color:#4ade80">CSLoginName · EmployeeNumber · OnSiteLocation</strong>.<br>
                 Excludes Clark · DSI · Zamboanga · Isabela &nbsp;·&nbsp;
                 Blank/<em>0000-0000</em> → <strong style="color:#a78bfa">Rest Day</strong>.
             </div>
@@ -413,6 +432,9 @@ with tab2:
                         if name:
                             leave_lookup[normalize(name)] = lrow.to_dict()
 
+                # Determine which day column applies for this date
+                day_col = get_day_column(date_str)
+
                 # Iterate over every roster row and join timesheet + leave data
                 for _, r_row in roster.iterrows():
                     cs_key = str(r_row.get("CSLoginName","") or "").strip().lower()
@@ -432,6 +454,14 @@ with tab2:
                     for day in DAY_COLS:
                         if day in r_row:
                             out[day] = r_row[day]
+
+                    # ── Is Scheduled ───────────────────────────────────────
+                    # Using the Date, determine the day-of-week column.
+                    # If that column is not "Rest Day", mark 1, else 0.
+                    is_scheduled = 0
+                    if day_col and day_col in r_row:
+                        is_scheduled = 1 if str(r_row[day_col]).strip() != "Rest Day" else 0
+                    out["Is Scheduled"] = is_scheduled
 
                     # ── timesheet fields ─────────────────────────────────────
                     first_login = None
@@ -557,7 +587,7 @@ with tab2:
             st.markdown("")
 
             disp = (["Date","Name","CSLoginName","EmployeeNumber","OnSiteLocation",
-                     "Present","Absent","Leave","For Review",
+                     "Is Scheduled","Present","Absent","Leave","For Review",
                      "FirstLogin","LastLogout","Active","Break",
                      "HireStatus","Position"] + DAY_COLS)
             disp = [c for c in disp if c in att_df.columns]
