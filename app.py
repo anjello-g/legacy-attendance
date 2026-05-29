@@ -86,7 +86,7 @@ for key in ["roster", "attendance", "merged_headcount"]:
 EXCLUDED_LOCATIONS = {"clark", "dsi", "zamboanga", "isabela"}
 DAY_COLS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 FUZZY_THRESHOLD = 0.82
-PREVIEW_ROWS = 5000  # Limit dataframe preview to prevent browser crash
+PREVIEW_ROWS = 50  # Limit dataframe preview to prevent browser crash
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def normalize(name: str) -> str:
@@ -186,7 +186,7 @@ def get_day_column(date_str: str) -> str:
 
 def clean_for_display(df: pd.DataFrame) -> pd.DataFrame:
     """Convert to strings for display, limit rows to prevent browser crash."""
-    df = df.head(PREVIEW_ROWS).copy()
+    df = df.head(PREVIEW_ROWS).copy()  # Only show top 50 rows in preview
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
