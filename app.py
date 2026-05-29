@@ -679,8 +679,6 @@ with tab2:
 
             with st.spinner(f"Reading {len(hc_files)} headcount file(s)…"):
                 for f in hc_files:
-                    export_dt = extract_headcount_date(f.name, df)
-                    dt_key = export_dt.strftime("%Y-%m-%d") if export_dt else f.name
                     try:
                         df = pd.read_excel(f, sheet_name=0)
                         if "ECN" not in df.columns:
@@ -689,6 +687,8 @@ with tab2:
                         if "DOJ Knack" not in df.columns:
                             st.error(f"Headcount file **{f.name}** missing **DOJ Knack** column.")
                             st.stop()
+                        export_dt = extract_headcount_date(f.name, df)
+                        dt_key = export_dt.strftime("%Y-%m-%d") if export_dt else f.name
                         df["ECN"] = pd.to_numeric(df["ECN"], errors="coerce")
                         df = df.dropna(subset=["ECN"])
                         df["ECN"] = df["ECN"].astype(int)
