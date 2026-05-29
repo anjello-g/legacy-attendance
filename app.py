@@ -679,7 +679,7 @@ with tab2:
 
             with st.spinner(f"Reading {len(hc_files)} headcount file(s)…"):
                 for f in hc_files:
-                    export_dt = parse_headcount_export_date(f.name)
+                    export_dt = extract_headcount_date(f.name, df)
                     dt_key = export_dt.strftime("%Y-%m-%d") if export_dt else f.name
                     try:
                         df = pd.read_excel(f, sheet_name=0)
