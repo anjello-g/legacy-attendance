@@ -8,11 +8,7 @@ from datetime import datetime, time, date
 import dateutil.parser
 import gc
 
-st.set_page_config(
-    page_title="Attendance Builder",
-    page_icon="🗂️",
-    layout="wide",
-)
+st.set_page_config(page_title="Attendance Builder", page_icon="🗂️", layout="wide")
 
 st.markdown("""
 <style>
@@ -21,113 +17,59 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 .stApp { background: #0f1117; color: #e8eaf0; }
 .block-container { padding-top: 2rem; max-width: 1400px; }
-
 .metric-card {
     background: #1a1d27; border: 1px solid #2a2d3a;
     border-radius: 12px; padding: 1.2rem 1.5rem; text-align: center;
 }
-.metric-val {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 2rem; font-weight: 700; line-height: 1;
-}
-.metric-lbl {
-    font-size: 0.78rem; color: #7c7f8e; margin-top: 4px;
-    text-transform: uppercase; letter-spacing: 0.08em;
-}
-
-.matched   { color: #4ade80; }
-.unmatched { color: #f87171; }
-.fuzzy     { color: #facc15; }
-.neutral   { color: #a78bfa; }
-.review    { color: #fb923c; }
-.not-hired { color: #60a5fa; }
-
+.metric-val { font-family: 'Space Grotesk', sans-serif; font-size: 2rem; font-weight: 700; line-height: 1; }
+.metric-lbl { font-size: 0.78rem; color: #7c7f8e; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.08em; }
+.matched { color: #4ade80; } .unmatched { color: #f87171; } .fuzzy { color: #facc15; }
+.neutral { color: #a78bfa; } .review { color: #fb923c; } .not-hired { color: #60a5fa; }
 .step-badge {
-    display: inline-block;
-    background: #1e1b4b; border: 1px solid #4338ca;
-    color: #a5b4fc; border-radius: 8px;
-    padding: 0.3rem 0.8rem; font-size: 0.72rem;
-    font-family: 'Space Grotesk', sans-serif;
-    font-weight: 600; letter-spacing: 0.08em;
+    display: inline-block; background: #1e1b4b; border: 1px solid #4338ca;
+    color: #a5b4fc; border-radius: 8px; padding: 0.3rem 0.8rem; font-size: 0.72rem;
+    font-family: 'Space Grotesk', sans-serif; font-weight: 600; letter-spacing: 0.08em;
     text-transform: uppercase; margin-bottom: 0.8rem;
 }
 .step-badge.done { background: #14532d; border-color: #166534; color: #4ade80; }
-.step-badge.warn { background: #422006; border-color: #92400e; color: #fb923c; }
-
-div[data-testid="stFileUploader"] {
-    background: #1a1d27; border: 2px dashed #2a2d3a;
-    border-radius: 12px; padding: 1rem;
-}
+div[data-testid="stFileUploader"] { background: #1a1d27; border: 2px dashed #2a2d3a; border-radius: 12px; padding: 1rem; }
 div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
 .stButton > button {
-    background: linear-gradient(135deg, #6366f1, #8b5cf6);
-    color: white; border: none; border-radius: 8px;
-    padding: 0.6rem 2rem;
-    font-family: 'Space Grotesk', sans-serif;
-    font-weight: 600; font-size: 0.95rem;
-    transition: opacity 0.2s; width: 100%;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; border: none;
+    border-radius: 8px; padding: 0.6rem 2rem; font-family: 'Space Grotesk', sans-serif;
+    font-weight: 600; font-size: 0.95rem; transition: opacity 0.2s; width: 100%;
 }
 .stButton > button:hover { opacity: 0.85; }
 .section-header {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 0.7rem; font-weight: 600;
-    letter-spacing: 0.12em; text-transform: uppercase;
-    color: #6366f1; margin-bottom: 0.5rem;
+    font-family: 'Space Grotesk', sans-serif; font-size: 0.7rem; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #6366f1; margin-bottom: 0.5rem;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ── session state init ────────────────────────────────────────────────────────
 for key in ["roster", "attendance", "merged_headcount"]:
     if key not in st.session_state:
         st.session_state[key] = None
 
-# ── constants ─────────────────────────────────────────────────────────────────
 EXCLUDED_LOCATIONS = {"clark", "dsi", "zamboanga", "isabela"}
 DAY_COLS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 FUZZY_THRESHOLD = 0.82
-PREVIEW_ROWS = 50  # Limit dataframe preview to prevent browser crash
+PREVIEW_ROWS = 50
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# FAST HELPERS — all dict/hashmap based, no pandas iteration
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def normalize(name: str) -> str:
     if pd.isna(name): return ""
-    name = str(name).lower().strip()
-    name = re.sub(r"[^a-z\s]", "", name)
-    return re.sub(r"\s+", " ", name)
-
-def build_staff_lookup(staff_df: pd.DataFrame) -> dict:
-    lookup: dict[str, list[int]] = {}
-    for idx, row in staff_df.iterrows():
-        key = normalize(row.get("Name", ""))
-        if key: lookup.setdefault(key, []).append(idx)
-        first = normalize(row.get("FirstName", ""))
-        last = normalize(row.get("LastName", ""))
-        if first and last:
-            lookup.setdefault(f"{first} {last}", []).append(idx)
-    return lookup
-
-def match_name(sched_name: str, lookup: dict, staff_df: pd.DataFrame):
-    norm = normalize(sched_name)
-    if not norm: return None, "no_name"
-    if norm in lookup:
-        return staff_df.loc[lookup[norm][0]], "exact"
-    best_score, best_key = 0.0, None
-    for key in lookup:
-        sc = SequenceMatcher(None, norm, key).ratio()
-        if sc > best_score:
-            best_score, best_key = sc, key
-    if best_score >= FUZZY_THRESHOLD and best_key:
-        return staff_df.loc[lookup[best_key][0]], f"fuzzy({best_score:.0%})"
-    return None, "unmatched"
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z\s]", "", str(name).lower().strip()))
 
 def normalize_schedule(val) -> str:
     if pd.isna(val): return "Rest Day"
     s = str(val).strip()
-    if s in ("", "0000 - 0000"): return "Rest Day"
-    return s
+    return "Rest Day" if s in ("", "0000 - 0000") else s
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Use xlsxwriter for much faster Excel generation than openpyxl."""
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
         df.to_excel(w, index=False, sheet_name="Result")
@@ -135,11 +77,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 def read_timesheet(file) -> pd.DataFrame:
     raw = pd.read_excel(file, sheet_name=0, header=None)
-    header_row = None
-    for i, row in raw.iterrows():
-        if row.astype(str).str.contains("Agent Email", case=False).any():
-            header_row = i
-            break
+    header_row = next((i for i, row in raw.iterrows() if row.astype(str).str.contains("Agent Email", case=False).any()), None)
     if header_row is None:
         raise ValueError("Could not find 'Agent Email' header in timesheet.")
     df = pd.read_excel(file, sheet_name=0, header=header_row)
@@ -156,20 +94,6 @@ def read_leave_file(file) -> pd.DataFrame:
             df = pd.read_excel(file, sheet_name=0, header=1)
     return df
 
-def attendance_status(first_login, active) -> str:
-    has_login = pd.notna(first_login) and str(first_login).strip() not in ("", "NaT")
-    try:
-        active_val = float(active) if pd.notna(active) else 0.0
-    except (ValueError, TypeError):
-        active_val = 0.0
-    if has_login and active_val >= 0.1:
-        return "Present"
-    if has_login and active_val < 0.1:
-        return "For Review"
-    if not has_login and active_val > 0:
-        return "For Review"
-    return ""
-
 def parse_date_str(date_str: str):
     for fmt in ("%m-%d-%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
         try:
@@ -180,33 +104,13 @@ def parse_date_str(date_str: str):
 
 def get_day_column(date_str: str) -> str:
     dt = parse_date_str(date_str)
-    if dt is None:
-        return None
-    return dt.strftime("%a")
+    return dt.strftime("%a") if dt else None
 
-def clean_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert to strings for display, limit rows to prevent browser crash."""
-    df = df.head(PREVIEW_ROWS).copy()  # Only show top 50 rows in preview
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
-        elif pd.api.types.is_integer_dtype(df[col]) and df[col].isna().any():
-            df[col] = df[col].astype('Int64').astype(str).replace('<NA>', '')
-    return df
-
-def parse_shift_start(shift_str: str) -> time:
-    if pd.isna(shift_str) or shift_str == "Rest Day":
+def parse_doj_knack(value) -> date:
+    if pd.isna(value) or str(value).strip() in ("", "NaT"):
         return None
-    parts = shift_str.strip().split("-")
-    if len(parts) < 2:
-        return None
-    start_str = parts[0].strip()
-    if len(start_str) == 4 and start_str.isdigit():
-        hour = int(start_str[:2])
-        minute = int(start_str[2:])
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            return time(hour, minute)
-    return None
+    dt = safe_parse_datetime(value)
+    return dt.date() if dt else None
 
 def safe_parse_datetime(value):
     if pd.isna(value) or str(value).strip() in ("", "NaT"):
@@ -218,29 +122,29 @@ def safe_parse_datetime(value):
     except:
         return None
 
+def parse_shift_start(shift_str: str) -> time:
+    if pd.isna(shift_str) or shift_str == "Rest Day":
+        return None
+    parts = shift_str.strip().split("-")
+    if len(parts) < 2:
+        return None
+    start_str = parts[0].strip()
+    if len(start_str) == 4 and start_str.isdigit():
+        h, m = int(start_str[:2]), int(start_str[2:])
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return time(h, m)
+    return None
+
 def compute_late(shift_start: time, first_login_dt, date_obj: date) -> tuple[int, float]:
     if shift_start is None or first_login_dt is None or date_obj is None:
         return 0, 0.0
-    threshold = datetime.combine(date_obj, shift_start)
-    diff = (first_login_dt - threshold).total_seconds() / 60.0
-    if diff > 0:
-        return 1, round(diff, 2)
-    return 0, 0.0
-
-def parse_doj_knack(value) -> date:
-    if pd.isna(value) or str(value).strip() in ("", "NaT"):
-        return None
-    dt = safe_parse_datetime(value)
-    if dt is not None:
-        return dt.date() if hasattr(dt, 'date') else dt
-    return None
+    diff = (first_login_dt - datetime.combine(date_obj, shift_start)).total_seconds() / 60.0
+    return (1, round(diff, 2)) if diff > 0 else (0, 0.0)
 
 def normalize_filename_date(filename: str) -> str:
     base = filename.replace(".xlsx", "").replace(".xls", "").strip()
     dt = parse_date_str(base)
-    if dt is not None:
-        return dt.strftime("%Y-%m-%d")
-    return base
+    return dt.strftime("%Y-%m-%d") if dt else base
 
 def extract_headcount_date(filename: str, hc_df: pd.DataFrame) -> date:
     for col in ["Date Exported", "DateExported", "Export Date", "ExportDate", "Date", "As Of"]:
@@ -248,19 +152,16 @@ def extract_headcount_date(filename: str, hc_df: pd.DataFrame) -> date:
             val = hc_df[col].dropna().iloc[0] if len(hc_df) > 0 else None
             if val is not None:
                 dt = safe_parse_datetime(val)
-                if dt is not None:
+                if dt:
                     return dt.date() if hasattr(dt, 'date') else dt
-    base = filename.replace(".xlsx", "").replace(".xls", "").strip()
-    dt = parse_date_str(base)
-    if dt is not None:
-        return dt.date()
-    return None
+    dt = parse_date_str(filename.replace(".xlsx", "").replace(".xls", "").strip())
+    return dt.date() if dt else None
 
 def parse_override_date(value) -> date:
     if pd.isna(value) or str(value).strip() in ("", "NaT", "None"):
         return None
     dt = safe_parse_datetime(value)
-    if dt is not None:
+    if dt:
         return dt.date() if hasattr(dt, 'date') else dt
     for fmt in ("%m-%d-%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y",
                 "%m-%d-%y", "%d-%m-%y", "%y-%m-%d"):
@@ -270,109 +171,86 @@ def parse_override_date(value) -> date:
             continue
     return None
 
+def clean_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.head(PREVIEW_ROWS).copy()
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).replace('nan', '').replace('None', '')
+        elif pd.api.types.is_integer_dtype(df[col]) and df[col].isna().any():
+            df[col] = df[col].astype('Int64').astype(str).replace('<NA>', '')
+    return df
+
 def build_override_template() -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     buf = BytesIO()
     wb = Workbook()
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="4338ca", end_color="4338ca", fill_type="solid")
-    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
-                         top=Side(style='thin'), bottom=Side(style='thin'))
-
-    ws1 = wb.active
-    ws1.title = "Schedule"
-    sched_headers = ["ECN", "Effective Date", "Effective Until", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    ws1.append(sched_headers)
-    for col in range(1, len(sched_headers) + 1):
-        cell = ws1.cell(row=1, column=col)
-        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align; cell.border = thin_border
+    hf = Font(bold=True, color="FFFFFF")
+    hfill = PatternFill(start_color="4338ca", end_color="4338ca", fill_type="solid")
+    ha = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    tb = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    def style_row(ws, row_idx, cols):
+        for c in range(1, cols + 1):
+            cell = ws.cell(row=1, column=c)
+            cell.font = hf; cell.fill = hfill; cell.alignment = ha; cell.border = tb
+    ws1 = wb.active; ws1.title = "Schedule"
+    ws1.append(["ECN", "Effective Date", "Effective Until", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"])
+    style_row(ws1, 1, 10)
     ws1.append([12345, "05-01-2026", "05-31-2026", "0900 - 1800", "Rest Day", "0900 - 1800", "0900 - 1800", "0900 - 1800", "0900 - 1800", "Rest Day"])
     for c in ['A','B','C']: ws1.column_dimensions[c].width = 16
     for c in ['D','E','F','G','H','I','J']: ws1.column_dimensions[c].width = 14
-
     ws2 = wb.create_sheet(title="Leave")
-    leave_headers = ["ECN", "Date", "Leave"]
-    ws2.append(leave_headers)
-    for col in range(1, len(leave_headers) + 1):
-        cell = ws2.cell(row=1, column=col)
-        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align; cell.border = thin_border
+    ws2.append(["ECN", "Date", "Leave"]); style_row(ws2, 1, 3)
     ws2.append([12345, "05-20-2026", 1])
-    ws2.column_dimensions['A'].width = 12; ws2.column_dimensions['B'].width = 16; ws2.column_dimensions['C'].width = 10
-
+    for c in ['A','B','C']: ws2.column_dimensions[c].width = 14
     ws3 = wb.create_sheet(title="Holidays")
-    holiday_headers = ["Project", "Sub-Process", "Date"]
-    ws3.append(holiday_headers)
-    for col in range(1, len(holiday_headers) + 1):
-        cell = ws3.cell(row=1, column=col)
-        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align; cell.border = thin_border
+    ws3.append(["Project", "Sub-Process", "Date"]); style_row(ws3, 1, 3)
     ws3.append(["Project Alpha", "", "05-01-2026"])
-    ws3.append(["Project Beta", "Sub-Process X", "05-12-2026"])
-    ws3.column_dimensions['A'].width = 20; ws3.column_dimensions['B'].width = 20; ws3.column_dimensions['C'].width = 16
-
+    for c in ['A','B','C']: ws3.column_dimensions[c].width = 18
     ws4 = wb.create_sheet(title="Exemptions")
-    exempt_headers = ["ECN", "Exemption Date", "Effective Until", "Active/Inactive"]
-    ws4.append(exempt_headers)
-    for col in range(1, len(exempt_headers) + 1):
-        cell = ws4.cell(row=1, column=col)
-        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align; cell.border = thin_border
+    ws4.append(["ECN", "Exemption Date", "Effective Until", "Active/Inactive"]); style_row(ws4, 1, 4)
     ws4.append([12345, "05-10-2026", "05-20-2026", "Inactive"])
-    ws4.column_dimensions['A'].width = 12; ws4.column_dimensions['B'].width = 18; ws4.column_dimensions['C'].width = 18; ws4.column_dimensions['D'].width = 18
-
+    for c in ['A','B','C','D']: ws4.column_dimensions[c].width = 18
     wb.save(buf)
     return buf.getvalue()
 
-# ── UI header ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — Roster
+# ═══════════════════════════════════════════════════════════════════════════════
+
 st.markdown("## 🗂️ Attendance Builder")
-st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave + headcount merge + overrides → final attendance.</p>', unsafe_allow_html=True)
+st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process everything in one go</p>', unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Build Final Attendance"])
+tab1, tab2 = st.tabs(["📋 Step 1 — Schedule + Staff", "⏱️ Step 2 — Build Final Attendance"])
 
-
-# ════════════════════════════════════════════════════════════════════════════════
-# STEP 1 — Schedule + Staff → enriched roster
-# ════════════════════════════════════════════════════════════════════════════════
 with tab1:
     st.markdown("")
-
     roster_ready = st.session_state.roster is not None
-    badge_html = (
-        '<span class="step-badge done">✔ Roster ready — proceed to Step 2</span>'
-        if roster_ready else
-        '<span class="step-badge">Roster not built yet</span>'
-    )
+    badge_html = '<span class="step-badge done">✔ Roster ready</span>' if roster_ready else '<span class="step-badge">Roster not built yet</span>'
     st.markdown(badge_html, unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
         st.markdown('<div class="section-header">📅 Schedule File</div>', unsafe_allow_html=True)
-        sched_file = st.file_uploader("Schedule", type=["xlsx","xls"],
-                                      key="sched", label_visibility="collapsed")
+        sched_file = st.file_uploader("Schedule", type=["xlsx","xls"], key="sched", label_visibility="collapsed")
     with c2:
         st.markdown('<div class="section-header">👥 Staff Roster File</div>', unsafe_allow_html=True)
-        staff_file = st.file_uploader("Staff", type=["xlsx","xls"],
-                                      key="staff", label_visibility="collapsed")
+        staff_file = st.file_uploader("Staff", type=["xlsx","xls"], key="staff", label_visibility="collapsed")
 
     st.markdown("")
-    run_step1 = st.button("▶  Build Roster", key="btn_step1")
-
-    if run_step1:
+    if st.button("▶ Build Roster", key="btn_step1"):
         if not sched_file or not staff_file:
-            st.warning("Upload both Schedule and Staff files first.", icon="⚠️")
-            st.stop()
+            st.warning("Upload both files first.", icon="⚠️"); st.stop()
 
         with st.spinner("Reading files…"):
             sched_df = pd.read_excel(sched_file, sheet_name=0)
             staff_df = pd.read_excel(staff_file, sheet_name=0)
 
         if "Name" not in sched_df.columns:
-            st.error("Schedule must have a **Name** column.")
-            st.stop()
+            st.error("Schedule must have a **Name** column."); st.stop()
         missing = {"Name", "CSLoginName", "EmployeeNumber"} - set(staff_df.columns)
         if missing:
-            st.error(f"Staff file missing: {missing}")
-            st.stop()
+            st.error(f"Staff file missing: {missing}"); st.stop()
 
         with st.spinner("Matching names…"):
             lookup = build_staff_lookup(staff_df)
@@ -386,46 +264,38 @@ with tab1:
                 if matched is not None:
                     loc_raw = matched.get("On Site Location", "")
                     loc = loc_raw if (pd.notna(loc_raw) and str(loc_raw).strip()) else "WFH"
-                    out["FullName_Staff"] = matched.get("Name", "")
-                    out["CSLoginName"] = matched.get("CSLoginName", "")
-                    out["EmployeeNumber"] = matched.get("EmployeeNumber", "")
-                    out["OnSiteLocation"] = loc
-                    out["MatchType"] = mtype
+                    out.update({
+                        "FullName_Staff": matched.get("Name", ""),
+                        "CSLoginName": matched.get("CSLoginName", ""),
+                        "EmployeeNumber": matched.get("EmployeeNumber", ""),
+                        "OnSiteLocation": loc,
+                        "MatchType": mtype
+                    })
                 else:
-                    out["FullName_Staff"] = ""
-                    out["CSLoginName"] = ""
-                    out["EmployeeNumber"] = ""
-                    out["OnSiteLocation"] = ""
-                    out["MatchType"] = mtype
+                    out.update({
+                        "FullName_Staff": "", "CSLoginName": "", "EmployeeNumber": "",
+                        "OnSiteLocation": "", "MatchType": mtype
+                    })
                 records.append(out)
 
         roster = pd.DataFrame(records)
         before = len(roster)
         roster = roster[~roster["OnSiteLocation"].str.strip().str.lower().isin(EXCLUDED_LOCATIONS)]
-        excluded_count = before - len(roster)
         st.session_state.roster = roster
 
-        total = len(roster)
-        exact_n = roster["MatchType"].str.startswith("exact").sum()
-        fuzzy_n = roster["MatchType"].str.startswith("fuzzy").sum()
-        unmatched = roster["MatchType"].isin(["unmatched","no_name"]).sum()
-
         st.markdown("---")
-        m1, m2, m3, m4, m5 = st.columns(5)
+        m1, m2, m3, m4 = st.columns(4)
         for col, val, lbl, cls in [
-            (m1, total, "Roster Size", ""),
-            (m2, exact_n, "Exact Matches", "matched"),
-            (m3, fuzzy_n, "Fuzzy Matches", "fuzzy"),
-            (m4, unmatched, "Unmatched", "unmatched"),
-            (m5, excluded_count, "Excluded (Location)", "unmatched"),
+            (m1, len(roster), "Roster Size", ""),
+            (m2, roster["MatchType"].str.startswith("exact").sum(), "Exact", "matched"),
+            (m3, roster["MatchType"].str.startswith("fuzzy").sum(), "Fuzzy", "fuzzy"),
+            (m4, roster["MatchType"].isin(["unmatched","no_name"]).sum(), "Unmatched", "unmatched"),
         ]:
             with col:
                 st.markdown(f'<div class="metric-card"><div class="metric-val {cls}">{val}</div><div class="metric-lbl">{lbl}</div></div>', unsafe_allow_html=True)
 
-        st.success("✔ Roster built! Switch to **Step 2** to process timesheets.")
-
-        disp = ["Name","FullName_Staff","CSLoginName","EmployeeNumber","OnSiteLocation","HireStatus","Position","MatchType"]
-        disp = [c for c in disp if c in roster.columns]
+        st.success("✔ Roster built! Switch to **Step 2**.")
+        disp = [c for c in ["Name","FullName_Staff","CSLoginName","EmployeeNumber","OnSiteLocation","HireStatus","Position","MatchType"] if c in roster.columns]
         st.dataframe(clean_for_display(roster[disp]), width="stretch", height=380)
 
         d1, d2 = st.columns([2,1])
@@ -435,174 +305,95 @@ with tab1:
         with d2:
             st.download_button("⬇️ Download as CSV", roster.to_csv(index=False).encode(), "roster.csv", "text/csv", use_container_width=True)
 
-    elif not run_step1 and not roster_ready:
+    elif not roster_ready:
         st.markdown("""
         <div style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:12px;padding:2rem;text-align:center;color:#7c7f8e;margin-top:1rem;">
             <div style="font-size:2.5rem;margin-bottom:0.5rem;">📋</div>
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;color:#e8eaf0;margin-bottom:0.4rem;">Upload Schedule + Staff to build the roster</div>
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;color:#e8eaf0;">Upload Schedule + Staff to build the roster</div>
         </div>
         """, unsafe_allow_html=True)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Build Final Attendance (merged everything)
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — FAST vectorized processing with dict lookups
+# ═══════════════════════════════════════════════════════════════════════════════
+
 with tab2:
     st.markdown("")
-
     roster = st.session_state.roster
 
     if roster is None:
         st.markdown("""
         <div style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:12px;padding:2rem;text-align:center;color:#7c7f8e;margin-top:1rem;">
             <div style="font-size:2.5rem;margin-bottom:0.5rem;">⏳</div>
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;color:#e8eaf0;margin-bottom:0.4rem;">Complete Step 1 first</div>
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;color:#e8eaf0;">Complete Step 1 first</div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown('<span class="step-badge done">✔ Roster loaded — upload files below</span>', unsafe_allow_html=True)
-        st.markdown(f'<span style="color:#7c7f8e;font-size:0.82rem;">{len(roster):,} roster rows · join key: CSLoginName</span>', unsafe_allow_html=True)
-
-        cs_lookup: dict[str, list[int]] = {}
-        for idx, row in roster.iterrows():
-            cs = str(row.get("CSLoginName","") or "").strip().lower()
-            if cs:
-                cs_lookup.setdefault(cs, []).append(idx)
+        st.markdown('<span class="step-badge done">✔ Roster loaded</span>', unsafe_allow_html=True)
+        st.markdown(f'<span style="color:#7c7f8e;font-size:0.82rem;">{len(roster):,} roster rows</span>', unsafe_allow_html=True)
 
         st.markdown("")
         st.markdown('<div class="section-header">⏱️ Timesheet File(s) *</div>', unsafe_allow_html=True)
-        ts_files = st.file_uploader(
-            "Upload timesheet(s) — filename = date (e.g. 5-17-2026.xlsx). Multi-upload supported.",
-            type=["xlsx","xls"], accept_multiple_files=True, key="ts", label_visibility="collapsed"
-        )
+        ts_files = st.file_uploader("Timesheets", type=["xlsx","xls"], accept_multiple_files=True, key="ts", label_visibility="collapsed")
 
         st.markdown("")
         st.markdown('<div class="section-header">🌴 Leave File(s)</div>', unsafe_allow_html=True)
-        leave_files = st.file_uploader(
-            "Upload leave file(s) — filename = date (e.g. 5-13-2026.xlsx). Multi-upload supported.",
-            type=["xlsx","xls"], accept_multiple_files=True, key="leave", label_visibility="collapsed"
-        )
+        leave_files = st.file_uploader("Leave files", type=["xlsx","xls"], accept_multiple_files=True, key="leave", label_visibility="collapsed")
 
         st.markdown("")
         st.markdown('<div class="section-header">👤 Headcount File(s) *</div>', unsafe_allow_html=True)
-        st.markdown('<span style="color:#7c7f8e;font-size:0.82rem;">Required for DOJ Knack check and headcount merge. Filename or "Date Exported" column identifies the snapshot date.</span>', unsafe_allow_html=True)
-        hc_files = st.file_uploader(
-            "Upload headcount export(s).", type=["xlsx","xls"], accept_multiple_files=True,
-            key="hc_step2", label_visibility="collapsed"
-        )
+        hc_files = st.file_uploader("Headcount", type=["xlsx","xls"], accept_multiple_files=True, key="hc_step2", label_visibility="collapsed")
 
         st.markdown("")
         st.markdown('<div class="section-header">📋 Override File (Optional)</div>', unsafe_allow_html=True)
-        st.markdown('<span style="color:#7c7f8e;font-size:0.82rem;">4 sheets: Schedule, Leave, Holidays, Exemptions. Overrides automated rules.</span>', unsafe_allow_html=True)
-        override_file = st.file_uploader("Override file", type=["xlsx"], key="override_uploader", label_visibility="collapsed")
+        override_file = st.file_uploader("Override", type=["xlsx"], key="override_uploader", label_visibility="collapsed")
 
         tmpl1, tmpl2 = st.columns([1,1])
         with tmpl1:
             st.download_button("⬇️ Download Override Template", build_override_template(), "override_template.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         with tmpl2:
-            st.markdown('<div style="color:#7c7f8e;font-size:0.78rem;padding-top:0.4rem;">Template includes sample rows for all 4 sheets.</div>', unsafe_allow_html=True)
+            st.markdown('<div style="color:#7c7f8e;font-size:0.78rem;padding-top:0.4rem;">4 sheets: Schedule, Leave, Holidays, Exemptions</div>', unsafe_allow_html=True)
 
         st.markdown("")
-        run_step2 = st.button("▶  Build Final Attendance", key="btn_step2")
-
-        if run_step2:
+        if st.button("▶ Build Final Attendance", key="btn_step2"):
             if not ts_files:
-                st.warning("Upload at least one timesheet file.", icon="⚠️")
-                st.stop()
+                st.warning("Upload at least one timesheet file.", icon="⚠️"); st.stop()
             if not hc_files:
-                st.warning("Upload at least one headcount file.", icon="⚠️")
-                st.stop()
+                st.warning("Upload at least one headcount file.", icon="⚠️"); st.stop()
 
-            # ── Load headcount files ─────────────────────────────────────────
-            doj_lookup: dict[int, date] = {}
-            hc_cache: dict[str, pd.DataFrame] = {}
-            hc_dates: list[date] = []
-
-            with st.spinner(f"Reading {len(hc_files)} headcount file(s)…"):
+            # ─────────────────────────────────────────────────────────────────
+            # 1. LOAD ALL FILES INTO MEMORY (dict-based)
+            # ─────────────────────────────────────────────────────────────────
+            with st.spinner("Loading files into memory…"):
+                # Headcount files
+                doj_lookup: dict[int, date] = {}
+                hc_cache: dict[str, pd.DataFrame] = {}
+                hc_dates: list[date] = []
                 for f in hc_files:
-                    try:
-                        df = pd.read_excel(f, sheet_name=0)
-                        if "ECN" not in df.columns:
-                            st.error(f"Headcount file **{f.name}** missing **ECN** column.")
-                            st.stop()
-                        if "DOJ Knack" not in df.columns:
-                            st.error(f"Headcount file **{f.name}** missing **DOJ Knack** column.")
-                            st.stop()
-                        export_dt = extract_headcount_date(f.name, df)
-                        dt_key = export_dt.strftime("%Y-%m-%d") if export_dt else f.name
-                        df["ECN"] = pd.to_numeric(df["ECN"], errors="coerce")
-                        df = df.dropna(subset=["ECN"])
-                        df["ECN"] = df["ECN"].astype(int)
-                        for _, row in df.iterrows():
-                            ecn = int(row["ECN"])
-                            doj = parse_doj_knack(row.get("DOJ Knack"))
-                            if doj is not None:
-                                doj_lookup[ecn] = doj
-                        hc_cache[dt_key] = df
-                        hc_dates.append(export_dt)
-                    except Exception as e:
-                        st.error(f"Error reading headcount file **{f.name}**: {e}")
+                    df = pd.read_excel(f, sheet_name=0)
+                    if "ECN" not in df.columns or "DOJ Knack" not in df.columns:
+                        st.error(f"Headcount **{f.name}** missing ECN or DOJ Knack"); st.stop()
+                    export_dt = extract_headcount_date(f.name, df)
+                    dt_key = export_dt.strftime("%Y-%m-%d") if export_dt else f.name
+                    df["ECN"] = pd.to_numeric(df["ECN"], errors="coerce").dropna().astype(int)
+                    for _, row in df.iterrows():
+                        doj = parse_doj_knack(row.get("DOJ Knack"))
+                        if doj:
+                            doj_lookup[int(row["ECN"])] = doj
+                    hc_cache[dt_key] = df
+                    hc_dates.append(export_dt)
 
-            if hc_dates:
-                valid_dates = [d.strftime('%m/%d/%Y') for d in sorted(hc_dates) if d is not None]
-                st.info(f"📅 Headcount snapshots available: {', '.join(valid_dates)}")
+                if hc_dates:
+                    st.info(f"📅 Headcount snapshots: {', '.join(d.strftime('%m/%d/%Y') for d in sorted(hc_dates) if d)}")
 
-            leave_by_date: dict[str, pd.DataFrame] = {}
-            if leave_files:
+                # Leave files — build dict of (normalized_name, date) → leave_row
+                leave_lookup: dict[tuple[str, str], dict] = {}
                 for lf in leave_files:
                     ldate = normalize_filename_date(lf.name)
-                    try:
-                        leave_by_date[ldate] = read_leave_file(lf)
-                    except Exception as e:
-                        st.error(f"Error reading leave file **{lf.name}**: {e}")
-
-            all_merged_records: list[pd.DataFrame] = []
-            errors = []
-            output_filename = "attendance.xlsx"
-
-            for i, ts_file in enumerate(ts_files):
-                date_str_raw = ts_file.name.replace(".xlsx","").replace(".xls","")
-                date_str = normalize_filename_date(ts_file.name)
-                if i == 0:
-                    output_filename = f"{date_str_raw}.xlsx"
-
-                parsed_date = parse_date_str(date_str_raw)
-                date_obj = parsed_date.date() if parsed_date else None
-
-                # ── Pick the best headcount for this timesheet date ──────────────
-                hc_df = None
-                hc_export_dt = None
-                if date_obj is not None and hc_dates:
-                    best_dt = None
-                    for dt in sorted(hc_dates):
-                        if dt <= date_obj:
-                            best_dt = dt
-                    if best_dt is None:
-                        best_dt = min(hc_dates)
-                    hc_export_dt = best_dt
-                    hc_df = hc_cache[best_dt.strftime("%Y-%m-%d")]
-                    st.write(f"📋 **{ts_file.name}** → using headcount from **{best_dt.strftime('%m/%d/%Y')}**")
-                else:
-                    hc_df = next(iter(hc_cache.values()))
-                    st.write(f"📋 **{ts_file.name}** → using headcount (date unknown)")
-
-                try:
-                    ts_df = read_timesheet(ts_file)
-                except Exception as e:
-                    errors.append(f"**{ts_file.name}**: {e}")
-                    continue
-
-                ts_by_cs: dict[str, dict] = {}
-                for _, ts_row in ts_df.iterrows():
-                    agent_email = str(ts_row.get("Agent Email","")).strip().lower()
-                    if agent_email:
-                        ts_by_cs[agent_email] = ts_row.to_dict()
-
-                leave_lookup: dict[str, dict] = {}
-                leave_df = leave_by_date.get(date_str)
-                if leave_df is not None:
-                    for _, lrow in leave_df.iterrows():
+                    ldf = read_leave_file(lf)
+                    for _, lrow in ldf.iterrows():
                         name = ""
                         for col in ["Name", "name", "Employee Name", "EmployeeName", "Full Name", "FullName"]:
                             if col in lrow and pd.notna(lrow[col]):
@@ -610,452 +401,399 @@ with tab2:
                                 if name:
                                     break
                         if name:
-                            clean_name = re.sub(r"\s+", " ", name.lower().strip())
-                            clean_name = re.sub(r"[^a-z\s]", "", clean_name)
-                            leave_lookup[clean_name] = lrow.to_dict()
+                            clean_name = normalize(name)
+                            leave_lookup[(clean_name, ldate)] = lrow.to_dict()
 
-                day_col = get_day_column(date_str_raw)
+                # Timesheets — build dict of (date, email_lower) → row_dict
+                ts_lookup: dict[tuple[str, str], dict] = {}
+                ts_dates: list[str] = []
+                for tsf in ts_files:
+                    date_str = normalize_filename_date(tsf.name)
+                    ts_dates.append(date_str)
+                    tdf = read_timesheet(tsf)
+                    for _, trow in tdf.iterrows():
+                        email = str(trow.get("Agent Email", "")).strip().lower()
+                        if email:
+                            ts_lookup[(date_str, email)] = trow.to_dict()
 
-                records = []
-                for _, r_row in roster.iterrows():
-                    cs_key = str(r_row.get("CSLoginName","") or "").strip().lower()
-                    ts_row = ts_by_cs.get(cs_key)
+            # ─────────────────────────────────────────────────────────────────
+            # 2. BUILD BASE ATTENDANCE DATAFRAME (vectorized, no Python loops)
+            # ─────────────────────────────────────────────────────────────────
+            with st.spinner("Building attendance records…"):
+                # Create a cross-product of roster × dates using pandas
+                roster_core = roster[["Name", "CSLoginName", "EmployeeNumber", "OnSiteLocation",
+                                       "HireStatus", "Position"] + DAY_COLS].copy()
 
-                    out = {
-                        "Date": date_str_raw,
-                        "Name": r_row.get("Name",""),
-                        "CSLoginName": r_row.get("CSLoginName",""),
-                        "EmployeeNumber": r_row.get("EmployeeNumber",""),
-                        "OnSiteLocation": r_row.get("OnSiteLocation",""),
-                        "HireStatus": r_row.get("HireStatus",""),
-                        "Position": r_row.get("Position",""),
+                # Build date info dict
+                date_info = {}
+                for d in ts_dates:
+                    dt = parse_date_str(d)
+                    date_info[d] = {
+                        "date_obj": dt.date() if dt else None,
+                        "day_col": dt.strftime("%a") if dt else None,
                     }
-                    for day in DAY_COLS:
-                        if day in r_row:
-                            out[day] = r_row[day]
 
-                    is_scheduled = 0
-                    shift_str = "Rest Day"
-                    if day_col and day_col in r_row:
-                        shift_str = normalize_schedule(r_row[day_col])
-                        if shift_str != "Rest Day":
-                            is_scheduled = 1
-                    out["Is Scheduled"] = is_scheduled
-                    out["Day"] = day_col if day_col else ""
-                    out["Shift"] = shift_str if shift_str else ""
+                # Repeat roster for each date
+                all_records = []
+                for d in ts_dates:
+                    df_day = roster_core.copy()
+                    df_day["Date"] = d
+                    df_day["_date_obj"] = date_info[d]["date_obj"]
+                    df_day["_day_col"] = date_info[d]["day_col"]
+                    all_records.append(df_day)
 
-                    not_yet_hired = False
-                    emp_num_raw = r_row.get("EmployeeNumber", "")
+                base_df = pd.concat(all_records, ignore_index=True)
+
+                # ── Vectorized shift extraction ──
+                def get_shift_for_day(row):
+                    dc = row["_day_col"]
+                    if dc and dc in row:
+                        return normalize_schedule(row[dc])
+                    return "Rest Day"
+
+                base_df["Shift"] = base_df.apply(get_shift_for_day, axis=1)
+                base_df["Is Scheduled"] = (base_df["Shift"] != "Rest Day").astype(int)
+
+                # ── Vectorized timesheet join via dict lookup ──
+                base_df["_cs_lower"] = base_df["CSLoginName"].astype(str).str.strip().str.lower()
+                base_df["_ts_key"] = base_df.apply(lambda r: (normalize_filename_date(r["Date"]), r["_cs_lower"]), axis=1)
+                base_df["_ts_row"] = base_df["_ts_key"].map(ts_lookup)
+
+                # Extract timesheet fields vectorized
+                base_df["AgentEmail"] = base_df["_ts_row"].apply(lambda x: x.get("Agent Email", "") if isinstance(x, dict) else "")
+                base_df["FirstLogin"] = base_df["_ts_row"].apply(lambda x: x.get("First Login") if isinstance(x, dict) else None)
+                base_df["LastLogout"] = base_df["_ts_row"].apply(lambda x: x.get("Last Logout", "") if isinstance(x, dict) else "")
+                base_df["Active"] = base_df["_ts_row"].apply(lambda x: x.get("Active") if isinstance(x, dict) else None)
+                base_df["Break"] = base_df["_ts_row"].apply(lambda x: x.get("Break", "") if isinstance(x, dict) else "")
+
+                # ── Vectorized attendance status ──
+                def vec_attendance_status(row):
+                    fl = row["FirstLogin"]
+                    act = row["Active"]
+                    has_login = pd.notna(fl) and str(fl).strip() not in ("", "NaT")
                     try:
-                        emp_num = int(float(emp_num_raw)) if pd.notna(emp_num_raw) and str(emp_num_raw).strip() != "" else None
-                    except (ValueError, TypeError):
-                        emp_num = None
+                        av = float(act) if pd.notna(act) else 0.0
+                    except:
+                        av = 0.0
+                    if has_login and av >= 0.1:
+                        return "Present"
+                    if has_login and av < 0.1:
+                        return "For Review"
+                    if not has_login and av > 0:
+                        return "For Review"
+                    return ""
 
-                    if emp_num is not None and emp_num in doj_lookup and date_obj is not None:
-                        doj_date = doj_lookup[emp_num]
-                        if doj_date > date_obj:
-                            not_yet_hired = True
-                            out["Shift"] = "Not yet hired"
-                            out["Is Scheduled"] = 0
-                            if day_col and day_col in out:
-                                out[day_col] = "Not yet hired"
+                base_df["_ts_status"] = base_df.apply(vec_attendance_status, axis=1)
 
-                    first_login_raw = None
-                    active = None
-                    if ts_row is not None:
-                        first_login_raw = ts_row.get("First Login")
-                        active = ts_row.get("Active")
-                        out["AgentEmail"] = ts_row.get("Agent Email","")
-                        out["FirstLogin"] = first_login_raw
-                        out["LastLogout"] = ts_row.get("Last Logout","")
-                        out["Active"] = active
-                        out["Break"] = ts_row.get("Break","")
+                # ── Vectorized leave join via dict lookup ──
+                base_df["_name_clean"] = base_df["Name"].apply(normalize)
+                base_df["_leave_key"] = base_df.apply(lambda r: (r["_name_clean"], normalize_filename_date(r["Date"])), axis=1)
+                base_df["_leave_row"] = base_df["_leave_key"].map(leave_lookup)
+
+                # Extract leave status vectorized
+                def vec_leave_status(leave_row):
+                    if not isinstance(leave_row, dict):
+                        return None
+                    for col in ["SL", "UPL"]:
+                        val = leave_row.get(col, 0)
+                        if pd.notna(val):
+                            try:
+                                if float(val) > 0:
+                                    return "Absent"
+                            except:
+                                if str(val).strip().lower() in ("1", "yes", "true", "y"):
+                                    return "Absent"
+                    for col in ["VL", "ML", "BL", "SPL", "PL", "MWL", "BDL"]:
+                        val = leave_row.get(col, 0)
+                        if pd.notna(val):
+                            try:
+                                if float(val) > 0:
+                                    return "Leave"
+                            except:
+                                if str(val).strip().lower() in ("1", "yes", "true", "y"):
+                                    return "Leave"
+                    return None
+
+                base_df["_leave_status"] = base_df["_leave_row"].apply(vec_leave_status)
+
+                # ── Vectorized flag calculation ──
+                base_df["Present"] = (base_df["_ts_status"] == "Present").astype(int)
+                base_df["For Review"] = (base_df["_ts_status"] == "For Review").astype(int)
+                base_df["Leave"] = (base_df["_leave_status"] == "Leave").astype(int)
+                base_df["Absent"] = 0
+
+                # For Review on Rest Day → not absent, not scheduled
+                fr_rest = (base_df["For Review"] == 1) & (base_df["Shift"] == "Rest Day")
+                base_df.loc[fr_rest, "Absent"] = 0
+                base_df.loc[fr_rest, "Is Scheduled"] = 0
+
+                # For Review on working day → absent, scheduled
+                fr_work = (base_df["For Review"] == 1) & (base_df["Shift"] != "Rest Day")
+                base_df.loc[fr_work, "Absent"] = 1
+                base_df.loc[fr_work, "Is Scheduled"] = 1
+
+                # Leave → absent=0
+                leave_mask = base_df["Leave"] == 1
+                base_df.loc[leave_mask, "Absent"] = 0
+
+                # Neither present, for_review, nor leave → absent
+                base_df.loc[(base_df["Present"] == 0) & (base_df["For Review"] == 0) & (base_df["Leave"] == 0), "Absent"] = 1
+
+                # DOJ Knack check (vectorized)
+                base_df["_emp_num"] = pd.to_numeric(base_df["EmployeeNumber"], errors="coerce")
+                base_df["_doj"] = base_df["_emp_num"].map(doj_lookup)
+                not_yet = (base_df["_doj"].notna()) & (base_df["_date_obj"].notna()) & (base_df["_doj"] > base_df["_date_obj"])
+                base_df.loc[not_yet, "Shift"] = "Not yet hired"
+                base_df.loc[not_yet, "Is Scheduled"] = 0
+                base_df.loc[not_yet, "Present"] = 0
+                base_df.loc[not_yet, "For Review"] = 0
+                base_df.loc[not_yet, "Leave"] = 0
+                base_df.loc[not_yet, "Absent"] = 0
+                for dc in DAY_COLS:
+                    mask = not_yet & (base_df["_day_col"] == dc)
+                    base_df.loc[mask, dc] = "Not yet hired"
+
+                # Late calculation (vectorized where possible)
+                base_df["_shift_start"] = base_df["Shift"].apply(parse_shift_start)
+                base_df["_first_login_dt"] = base_df["FirstLogin"].apply(safe_parse_datetime)
+                base_df["Late"] = 0
+                base_df["Late Minutes"] = 0.0
+
+                late_mask = base_df["_shift_start"].notna() & base_df["_first_login_dt"].notna() & base_df["_date_obj"].notna() & ~not_yet
+                for idx in base_df[late_mask].index:
+                    row = base_df.loc[idx]
+                    threshold = datetime.combine(row["_date_obj"], row["_shift_start"])
+                    diff = (row["_first_login_dt"] - threshold).total_seconds() / 60.0
+                    if diff > 0:
+                        base_df.at[idx, "Late"] = 1
+                        base_df.at[idx, "Late Minutes"] = round(diff, 2)
+
+            # ─────────────────────────────────────────────────────────────────
+            # 3. MERGE HEADCOUNT (one merge per timesheet date, vectorized)
+            # ─────────────────────────────────────────────────────────────────
+            with st.spinner("Merging headcount data…"):
+                all_merged = []
+                for d in ts_dates:
+                    day_df = base_df[base_df["Date"] == d].copy()
+                    date_obj = date_info[d]["date_obj"]
+
+                    # Pick headcount
+                    hc_df = None
+                    if date_obj and hc_dates:
+                        best_dt = max((dt for dt in hc_dates if dt and dt <= date_obj), default=min(hc_dates))
+                        hc_df = hc_cache[best_dt.strftime("%Y-%m-%d")]
                     else:
-                        out["AgentEmail"] = ""
-                        out["FirstLogin"] = ""
-                        out["LastLogout"] = ""
-                        out["Active"] = ""
-                        out["Break"] = ""
+                        hc_df = next(iter(hc_cache.values()))
 
-                    ts_status = ""
-                    if ts_row is not None:
-                        ts_status = attendance_status(first_login_raw, active)
+                    # Merge
+                    hc_df = hc_df.copy()
+                    hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce").dropna().astype(int)
+                    day_df["_merge_key"] = pd.to_numeric(day_df["EmployeeNumber"], errors="coerce").dropna().astype(int)
 
-                    leave_status = None
-                    roster_name = str(r_row.get("Name", ""))
-                    norm_name = re.sub(r"\s+", " ", roster_name.lower().strip())
-                    norm_name = re.sub(r"[^a-z\s]", "", norm_name)
-                    leave_row = leave_lookup.get(norm_name)
-                    if leave_row is None:
-                        best_score, best_key = 0.0, None
-                        for key in leave_lookup:
-                            sc = SequenceMatcher(None, norm_name, key).ratio()
-                            if sc > best_score:
-                                best_score, best_key = sc, key
-                        if best_score >= FUZZY_THRESHOLD and best_key:
-                            leave_row = leave_lookup[best_key]
-
-                    if leave_row is not None:
-                        for col in ["SL", "UPL"]:
-                            val = leave_row.get(col, 0)
-                            if pd.notna(val):
-                                try:
-                                    if float(val) > 0:
-                                        leave_status = "Absent"
-                                        break
-                                except (ValueError, TypeError):
-                                    if str(val).strip().lower() in ("1", "yes", "true", "y"):
-                                        leave_status = "Absent"
-                                        break
-                        if leave_status is None:
-                            for col in ["VL", "ML", "BL", "SPL", "PL", "MWL", "BDL"]:
-                                val = leave_row.get(col, 0)
-                                if pd.notna(val):
-                                    try:
-                                        if float(val) > 0:
-                                            leave_status = "Leave"
-                                            break
-                                    except (ValueError, TypeError):
-                                        if str(val).strip().lower() in ("1", "yes", "true", "y"):
-                                            leave_status = "Leave"
-                                            break
-
-                    present = 1 if ts_status == "Present" else 0
-                    for_review = 1 if ts_status == "For Review" else 0
-                    leave = 0
-                    absent = 0
-
-                    if not_yet_hired:
-                        present = 0; for_review = 0; leave = 0; absent = 0
-                    elif present == 1:
-                        pass
-                    elif for_review == 1:
-                        if shift_str == "Rest Day":
-                            absent = 0; is_scheduled = 0
-                        else:
-                            absent = 1; is_scheduled = 1
-                    elif leave_status == "Leave":
-                        leave = 1; absent = 0
-                    else:
-                        absent = 1
-
-                    out["Present"] = present
-                    out["For Review"] = for_review
-                    out["Leave"] = leave
-                    out["Absent"] = absent
-
-                    if not_yet_hired:
-                        out["Late"] = 0; out["Late Minutes"] = 0.0
-                    else:
-                        shift_start_time = parse_shift_start(shift_str)
-                        first_login_dt = safe_parse_datetime(first_login_raw) if ts_row else None
-                        late_flag, late_minutes = compute_late(shift_start_time, first_login_dt, date_obj)
-                        out["Late"] = late_flag; out["Late Minutes"] = late_minutes
-
-                    records.append(out)
-
-                att_df = pd.DataFrame(records)
-
-                # ── Merge Headcount for this date ───────────────────────────────
-                required_hc = {"ECN", "Employee", "Project", "Sub-Process", "Supervisor",
+                    hc_cols = ["ECN", "Employee", "Project", "Sub-Process", "Supervisor",
                                "Role", "Manager", "DOJ Knack", "Date of Separation",
-                               "Billable/Buffer", "Active/Inactive"}
-                missing_hc = required_hc - set(hc_df.columns)
-                if missing_hc:
-                    st.error(f"Headcount file missing required columns: {missing_hc}")
-                    st.stop()
+                               "Billable/Buffer", "Active/Inactive"]
+                    hc_subset = hc_df[[c for c in hc_cols if c in hc_df.columns]].copy()
 
-                hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce")
-                hc_df = hc_df.dropna(subset=["ECN"])
-                hc_df["ECN"] = hc_df["ECN"].astype(int)
+                    merged = day_df.merge(hc_subset, left_on="_merge_key", right_on="ECN", how="left")
+                    merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
+                    merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
 
-                att_merge = att_df.copy()
-                att_merge["_merge_key"] = pd.to_numeric(att_merge["EmployeeNumber"], errors="coerce")
-                att_merge = att_merge.dropna(subset=["_merge_key"])
-                att_merge["_merge_key"] = att_merge["_merge_key"].astype(int)
+                    # Separation date (vectorized)
+                    if "Date of Separation" in merged.columns:
+                        has_sep = merged["Date of Separation"].apply(lambda x: pd.notna(x) and str(x).strip() != "" and str(x).strip().lower() != "nat")
+                        merged.loc[has_sep, "Absent"] = 0
+                        merged.loc[has_sep, "Is Scheduled"] = 0
 
-                hc_cols = ["ECN", "Employee", "Project", "Sub-Process", "Supervisor",
-                           "Role", "Manager", "DOJ Knack", "Date of Separation",
-                           "Billable/Buffer", "Active/Inactive"]
-                hc_subset = hc_df[hc_cols].copy()
+                    # Maternity/Suspended (vectorized)
+                    if "Role" in merged.columns:
+                        is_mat_susp = merged["Role"].astype(str).str.lower().str.contains("maternity|suspended", case=False, na=False)
+                        with_login = is_mat_susp & (merged["Present"] == 1)
+                        merged.loc[with_login, ["Is Scheduled", "Present", "Absent", "Leave"]] = [1, 1, 0, 0]
+                        if "Active/Inactive" in merged.columns:
+                            merged.loc[with_login, "Active/Inactive"] = "Active"
+                        no_login = is_mat_susp & (merged["Present"] == 0)
+                        merged.loc[no_login, ["Is Scheduled", "Absent", "Leave"]] = [0, 0, 0]
 
-                merged = att_merge.merge(hc_subset, left_on="_merge_key", right_on="ECN", how="left")
-                merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
-                merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
+                    all_merged.append(merged)
 
-                # ── separation date rule ─────────────────────────────────────────
-                sep_col = "Date of Separation"
-                if sep_col in merged.columns:
-                    has_sep = merged[sep_col].apply(lambda x: pd.notna(x) and str(x).strip() != "" and str(x).strip().lower() != "nat")
-                    merged.loc[has_sep, "Absent"] = 0
-                    merged.loc[has_sep, "Is Scheduled"] = 0
+                final_merged = pd.concat(all_merged, ignore_index=True)
 
-                # ── Maternity / Suspended rule ────────────────────────────────────
-                if "Role" in merged.columns:
-                    role_lower = merged["Role"].astype(str).str.lower()
-                    is_mat_or_susp = role_lower.str.contains("maternity|suspended", case=False, na=False)
-                    has_login = merged["Present"] == 1
-                    mat_susp_with_login = is_mat_or_susp & has_login
-                    merged.loc[mat_susp_with_login, "Is Scheduled"] = 1
-                    merged.loc[mat_susp_with_login, "Present"] = 1
-                    merged.loc[mat_susp_with_login, "Absent"] = 0
-                    merged.loc[mat_susp_with_login, "Leave"] = 0
-                    if "Active/Inactive" in merged.columns:
-                        merged.loc[mat_susp_with_login, "Active/Inactive"] = "Active"
-                    no_login = merged["Present"] == 0
-                    mat_susp_no_login = is_mat_or_susp & no_login
-                    merged.loc[mat_susp_no_login, "Is Scheduled"] = 0
-                    merged.loc[mat_susp_no_login, "Absent"] = 0
-                    merged.loc[mat_susp_no_login, "Leave"] = 0
-
-                # ── DOJ Knack re-check ────────────────────────────────────────────
-                if "DOJ Knack" in merged.columns:
-                    for idx, row in merged.iterrows():
-                        doj_val = row.get("DOJ Knack")
-                        date_str = row.get("Date", "")
-                        doj_date = parse_doj_knack(doj_val)
-                        parsed_date = parse_date_str(str(date_str))
-                        date_obj2 = parsed_date.date() if parsed_date else None
-                        if doj_date is not None and date_obj2 is not None and doj_date > date_obj2:
-                            merged.at[idx, "Shift"] = "Not yet hired"
-                            merged.at[idx, "Is Scheduled"] = 0
-                            merged.at[idx, "Absent"] = 0
-                            merged.at[idx, "Present"] = 0
-                            merged.at[idx, "For Review"] = 0
-                            merged.at[idx, "Leave"] = 0
-                            merged.at[idx, "Late"] = 0
-                            merged.at[idx, "Late Minutes"] = 0.0
-                            day_col2 = row.get("Day", "")
-                            if day_col2 and day_col2 in DAY_COLS and day_col2 in merged.columns:
-                                merged.at[idx, day_col2] = "Not yet hired"
-
-                all_merged_records.append(merged)
-
-            if errors:
-                for e in errors:
-                    st.error(e)
-
-            if not all_merged_records:
-                st.warning("No records processed.")
-                st.stop()
-
-            # Combine all dates
-            final_merged = pd.concat(all_merged_records, ignore_index=True)
-
-            # ── Override processing (vectorized, no nested iterrows) ─────────
+            # ─────────────────────────────────────────────────────────────────
+            # 4. OVERRIDES (vectorized)
+            # ─────────────────────────────────────────────────────────────────
             if override_file is not None:
                 with st.spinner("Applying overrides…"):
                     xl = pd.ExcelFile(override_file)
 
-                    # Pre-parse dates and strings for vectorized matching
+                    # Pre-parse for fast matching
                     final_merged["_date_parsed"] = final_merged["Date"].apply(lambda d: parse_override_date(str(d)) if pd.notna(d) else None)
-                    final_merged["_emp_num_str"] = final_merged["EmployeeNumber"].astype(str).str.strip()
-                    final_merged["_proj_lower"] = final_merged["Project"].astype(str).str.strip().str.lower()
-                    final_merged["_subproc_lower"] = final_merged["Sub-Process"].astype(str).str.strip().str.lower()
+                    final_merged["_emp_str"] = final_merged["EmployeeNumber"].astype(str).str.strip()
+                    final_merged["_proj_lc"] = final_merged["Project"].astype(str).str.strip().str.lower()
+                    final_merged["_sub_lc"] = final_merged["Sub-Process"].astype(str).str.strip().str.lower()
 
-                    # 1. Schedule Override
+                    # Schedule overrides
                     if "Schedule" in xl.sheet_names:
-                        sched_ov = pd.read_excel(override_file, sheet_name="Schedule")
-                        required_sched = {"ECN", "Effective Date", "Effective Until"}
-                        day_cols_found = [d for d in DAY_COLS if d in sched_ov.columns]
-                        if required_sched.issubset(set(sched_ov.columns)) and day_cols_found:
-                            sched_ov["ECN"] = pd.to_numeric(sched_ov["ECN"], errors="coerce")
-                            sched_ov = sched_ov.dropna(subset=["ECN"])
-                            sched_ov["ECN"] = sched_ov["ECN"].astype(int)
-                            for _, ov_row in sched_ov.iterrows():
-                                ecn = str(int(ov_row["ECN"]))
-                                eff_start = parse_override_date(ov_row.get("Effective Date"))
-                                eff_end = parse_override_date(ov_row.get("Effective Until"))
-                                if eff_start is None or eff_end is None:
+                        sov = pd.read_excel(override_file, sheet_name="Schedule")
+                        if {"ECN", "Effective Date", "Effective Until"}.issubset(set(sov.columns)):
+                            sov["ECN"] = pd.to_numeric(sov["ECN"], errors="coerce").dropna().astype(int).astype(str)
+                            sov["_s"] = sov["Effective Date"].apply(parse_override_date)
+                            sov["_e"] = sov["Effective Until"].apply(parse_override_date)
+                            for _, ov in sov.iterrows():
+                                if ov["_s"] is None or ov["_e"] is None:
                                     continue
-                                mask = (final_merged["_emp_num_str"] == ecn) & (final_merged["_date_parsed"].notna()) & (final_merged["_date_parsed"] >= eff_start) & (final_merged["_date_parsed"] <= eff_end)
+                                mask = (final_merged["_emp_str"] == ov["ECN"]) & (final_merged["_date_parsed"].notna()) & (final_merged["_date_parsed"] >= ov["_s"]) & (final_merged["_date_parsed"] <= ov["_e"])
                                 if not mask.any():
                                     continue
-                                for day_name in DAY_COLS:
-                                    if day_name in ov_row and day_name in final_merged.columns:
-                                        day_mask = mask & (final_merged["_date_parsed"].apply(lambda d: d.strftime("%a") if d else "") == day_name)
-                                        if day_mask.any():
-                                            new_shift = normalize_schedule(ov_row[day_name])
-                                            final_merged.loc[day_mask, day_name] = new_shift
-                                            final_merged.loc[day_mask, "Shift"] = new_shift
-                                            final_merged.loc[day_mask, "Is Scheduled"] = 0 if new_shift == "Rest Day" else 1
+                                for dn in DAY_COLS:
+                                    if dn in ov and dn in final_merged.columns:
+                                        dm = mask & (final_merged["_date_parsed"].apply(lambda d: d.strftime("%a") if d else "") == dn)
+                                        if dm.any():
+                                            ns = normalize_schedule(ov[dn])
+                                            final_merged.loc[dm, dn] = ns
+                                            final_merged.loc[dm, "Shift"] = ns
+                                            final_merged.loc[dm, "Is Scheduled"] = 0 if ns == "Rest Day" else 1
 
-                    # 2. Leave Override
+                    # Leave overrides
                     if "Leave" in xl.sheet_names:
-                        leave_ov = pd.read_excel(override_file, sheet_name="Leave")
-                        if {"ECN", "Date", "Leave"}.issubset(set(leave_ov.columns)):
-                            leave_ov["ECN"] = pd.to_numeric(leave_ov["ECN"], errors="coerce")
-                            leave_ov = leave_ov.dropna(subset=["ECN"])
-                            leave_ov["ECN"] = leave_ov["ECN"].astype(int)
-                            for _, ov_row in leave_ov.iterrows():
-                                ecn = str(int(ov_row["ECN"]))
-                                ov_date = parse_override_date(ov_row.get("Date"))
-                                leave_flag = ov_row.get("Leave", 0)
-                                try:
-                                    leave_flag = int(float(leave_flag))
-                                except (ValueError, TypeError):
-                                    leave_flag = 0
-                                if ov_date is None or leave_flag != 1:
+                        lov = pd.read_excel(override_file, sheet_name="Leave")
+                        if {"ECN", "Date", "Leave"}.issubset(set(lov.columns)):
+                            lov["ECN"] = pd.to_numeric(lov["ECN"], errors="coerce").dropna().astype(int).astype(str)
+                            lov["_d"] = lov["Date"].apply(parse_override_date)
+                            for _, ov in lov.iterrows():
+                                if ov["_d"] is None or int(float(ov.get("Leave", 0))) != 1:
                                     continue
-                                mask = (final_merged["_emp_num_str"] == ecn) & (final_merged["_date_parsed"] == ov_date)
+                                mask = (final_merged["_emp_str"] == ov["ECN"]) & (final_merged["_date_parsed"] == ov["_d"])
                                 if not mask.any():
                                     continue
-                                final_merged.loc[mask, "Leave"] = 1
-                                final_merged.loc[mask, "Absent"] = 0
-                                final_merged.loc[mask, "Present"] = 0
-                                final_merged.loc[mask, "For Review"] = 0
-                                not_hired_mask = mask & (final_merged["Shift"] == "Not yet hired")
-                                if not_hired_mask.any():
-                                    day_name = ov_date.strftime("%a")
-                                    if day_name in final_merged.columns:
-                                        final_merged.loc[not_hired_mask, day_name] = "Leave"
-                                    final_merged.loc[not_hired_mask, "Shift"] = "Leave"
+                                final_merged.loc[mask, ["Leave", "Absent", "Present", "For Review"]] = [1, 0, 0, 0]
+                                nh = mask & (final_merged["Shift"] == "Not yet hired")
+                                if nh.any():
+                                    dn = ov["_d"].strftime("%a")
+                                    if dn in final_merged.columns:
+                                        final_merged.loc[nh, dn] = "Leave"
+                                    final_merged.loc[nh, "Shift"] = "Leave"
 
-                    # 3. Special Holidays
+                    # Holiday overrides
                     if "Holidays" in xl.sheet_names:
-                        hol_ov = pd.read_excel(override_file, sheet_name="Holidays")
-                        if {"Project", "Date"}.issubset(set(hol_ov.columns)):
-                            for _, ov_row in hol_ov.iterrows():
-                                proj = str(ov_row.get("Project", "")).strip().lower()
-                                subproc = str(ov_row.get("Sub-Process", "")).strip().lower()
-                                hol_date = parse_override_date(ov_row.get("Date"))
-                                if hol_date is None or not proj:
+                        hov = pd.read_excel(override_file, sheet_name="Holidays")
+                        if {"Project", "Date"}.issubset(set(hov.columns)):
+                            hov["_p"] = hov["Project"].astype(str).str.strip().str.lower()
+                            hov["_s"] = hov["Sub-Process"].fillna("").astype(str).str.strip().str.lower()
+                            hov["_d"] = hov["Date"].apply(parse_override_date)
+                            for _, ov in hov.iterrows():
+                                if ov["_d"] is None or not ov["_p"]:
                                     continue
-
-                                mask = (final_merged["_proj_lower"] == proj) & (final_merged["_date_parsed"] == hol_date)
-                                if subproc:
-                                    mask = mask & (final_merged["_subproc_lower"] == subproc)
-
+                                mask = (final_merged["_proj_lc"] == ov["_p"]) & (final_merged["_date_parsed"] == ov["_d"])
+                                if ov["_s"]:
+                                    mask = mask & (final_merged["_sub_lc"] == ov["_s"])
                                 if not mask.any():
                                     continue
+                                final_merged.loc[mask, ["Is Scheduled", "Absent", "Leave"]] = [0, 0, 0]
+                                pm = mask & (final_merged["Present"] == 1)
+                                final_merged.loc[pm, "Is Scheduled"] = 1
+                                sm = mask & (~final_merged["Shift"].isin(["Not yet hired", "Leave"]))
+                                final_merged.loc[sm, "Shift"] = "Holiday"
+                                dn = ov["_d"].strftime("%a")
+                                if dn in final_merged.columns:
+                                    final_merged.loc[sm, dn] = "Holiday"
 
-                                # Holiday rule: unschedule everyone, clear absent/leave
-                                final_merged.loc[mask, "Is Scheduled"] = 0
-                                final_merged.loc[mask, "Absent"] = 0
-                                final_merged.loc[mask, "Leave"] = 0
-
-                                # If they worked (Present), mark as scheduled
-                                present_mask = mask & (final_merged["Present"] == 1)
-                                final_merged.loc[present_mask, "Is Scheduled"] = 1
-
-                                # Update shift display for non-leave, non-not-yet-hired rows
-                                shift_mask = mask & (~final_merged["Shift"].isin(["Not yet hired", "Leave"]))
-                                final_merged.loc[shift_mask, "Shift"] = "Holiday"
-                                day_name = hol_date.strftime("%a")
-                                if day_name in final_merged.columns:
-                                    final_merged.loc[shift_mask, day_name] = "Holiday"
-
-                    # 4. Exemptions
+                    # Exemptions
                     if "Exemptions" in xl.sheet_names:
-                        exempt_ov = pd.read_excel(override_file, sheet_name="Exemptions")
-                        if {"ECN", "Exemption Date", "Effective Until", "Active/Inactive"}.issubset(set(exempt_ov.columns)):
-                            exempt_ov["ECN"] = pd.to_numeric(exempt_ov["ECN"], errors="coerce")
-                            exempt_ov = exempt_ov.dropna(subset=["ECN"])
-                            exempt_ov["ECN"] = exempt_ov["ECN"].astype(int)
-                            for _, ov_row in exempt_ov.iterrows():
-                                ecn = str(int(ov_row["ECN"]))
-                                eff_start = parse_override_date(ov_row.get("Exemption Date"))
-                                eff_end = parse_override_date(ov_row.get("Effective Until"))
-                                new_status = str(ov_row.get("Active/Inactive", "")).strip()
-                                if eff_start is None or eff_end is None:
+                        eov = pd.read_excel(override_file, sheet_name="Exemptions")
+                        if {"ECN", "Exemption Date", "Effective Until", "Active/Inactive"}.issubset(set(eov.columns)):
+                            eov["ECN"] = pd.to_numeric(eov["ECN"], errors="coerce").dropna().astype(int).astype(str)
+                            eov["_s"] = eov["Exemption Date"].apply(parse_override_date)
+                            eov["_e"] = eov["Effective Until"].apply(parse_override_date)
+                            for _, ov in eov.iterrows():
+                                if ov["_s"] is None or ov["_e"] is None:
                                     continue
-                                mask = (final_merged["_emp_num_str"] == ecn) & (final_merged["_date_parsed"].notna()) & (final_merged["_date_parsed"] >= eff_start) & (final_merged["_date_parsed"] <= eff_end)
+                                mask = (final_merged["_emp_str"] == ov["ECN"]) & (final_merged["_date_parsed"].notna()) & (final_merged["_date_parsed"] >= ov["_s"]) & (final_merged["_date_parsed"] <= ov["_e"])
                                 if not mask.any():
                                     continue
-                                final_merged.loc[mask, "Is Scheduled"] = 0
-                                final_merged.loc[mask, "Absent"] = 0
-                                if "Active/Inactive" in final_merged.columns and new_status:
-                                    final_merged.loc[mask, "Active/Inactive"] = new_status
+                                final_merged.loc[mask, ["Is Scheduled", "Absent"]] = [0, 0]
+                                ns = str(ov.get("Active/Inactive", "")).strip()
+                                if "Active/Inactive" in final_merged.columns and ns:
+                                    final_merged.loc[mask, "Active/Inactive"] = ns
 
-                    # Clean up temp columns
-                    final_merged = final_merged.drop(columns=["_date_parsed", "_emp_num_str", "_proj_lower", "_subproc_lower"], errors="ignore")
-
+                    final_merged = final_merged.drop(columns=["_date_parsed", "_emp_str", "_proj_lc", "_sub_lc"], errors="ignore")
                 st.success("✔ Overrides applied!")
 
-            # ── Final consistency rules ────────────────────────────────────────
-            unmatched_mask = final_merged["HeadcountMatch"] == "❌ Unmatched"
-            final_merged.loc[unmatched_mask, "Is Scheduled"] = 0
-            final_merged.loc[unmatched_mask, "Absent"] = 0
+            # ── Final consistency ──
+            um = final_merged["HeadcountMatch"] == "❌ Unmatched"
+            final_merged.loc[um, ["Is Scheduled", "Absent"]] = [0, 0]
 
-            not_scheduled = final_merged["Is Scheduled"] == 0
-            final_merged.loc[not_scheduled, "Absent"] = 0
-            final_merged.loc[not_scheduled, "Leave"] = 0
+            ns = final_merged["Is Scheduled"] == 0
+            final_merged.loc[ns, ["Absent", "Leave"]] = [0, 0]
 
-            present_but_not_scheduled = (final_merged["Is Scheduled"] == 0) & (final_merged["Present"] == 1)
-            final_merged.loc[present_but_not_scheduled, "Is Scheduled"] = 1
+            pns = (final_merged["Is Scheduled"] == 0) & (final_merged["Present"] == 1)
+            final_merged.loc[pns, "Is Scheduled"] = 1
 
-            for_review_mask = (final_merged["For Review"] == 1) & (final_merged["Is Scheduled"] == 1)
-            final_merged.loc[for_review_mask, "Absent"] = 1
+            frm = (final_merged["For Review"] == 1) & (final_merged["Is Scheduled"] == 1)
+            final_merged.loc[frm, "Absent"] = 1
 
-            leave_mask = final_merged["Leave"] == 1
-            final_merged.loc[leave_mask, "Absent"] = 0
+            lm = final_merged["Leave"] == 1
+            final_merged.loc[lm, "Absent"] = 0
+
+            # Clean up temp columns
+            drop_cols = [c for c in ["_cs_lower", "_ts_key", "_ts_row", "_name_clean", "_leave_key", "_leave_row",
+                         "_emp_num", "_doj", "_shift_start", "_first_login_dt", "_date_obj", "_day_col", "_ts_status", "_leave_status"] if c in final_merged.columns]
+            final_merged = final_merged.drop(columns=drop_cols, errors="ignore")
 
             st.session_state.attendance = final_merged
             st.session_state.merged_headcount = final_merged
 
-            # ── Metrics ───────────────────────────────────────────────────────
-            total_rows = len(final_merged)
-            present_n = final_merged["Present"].sum()
-            review_n = final_merged["For Review"].sum()
-            leave_n = final_merged["Leave"].sum()
-            absent_n = final_merged["Absent"].sum()
-            not_hired_n = (final_merged["Shift"] == "Not yet hired").sum()
-            matched_n = (final_merged["HeadcountMatch"] == "✅ Matched").sum()
-            unmatched_n = (final_merged["HeadcountMatch"] == "❌ Unmatched").sum()
-
+            # ── Metrics ──
             st.markdown("---")
-            ma1, ma2, ma3, ma4, ma5, ma6, ma7 = st.columns(7)
+            m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
             for col, val, lbl, cls in [
-                (ma1, total_rows, "Total Rows", ""),
-                (ma2, present_n, "Present", "matched"),
-                (ma3, review_n, "For Review", "review"),
-                (ma4, leave_n, "On Leave", "neutral"),
-                (ma5, absent_n, "Absent", "unmatched"),
-                (ma6, not_hired_n, "Not Yet Hired", "not-hired"),
-                (ma7, matched_n, "HC Matched", "matched"),
+                (m1, len(final_merged), "Total Rows", ""),
+                (m2, final_merged["Present"].sum(), "Present", "matched"),
+                (m3, final_merged["For Review"].sum(), "For Review", "review"),
+                (m4, final_merged["Leave"].sum(), "On Leave", "neutral"),
+                (m5, final_merged["Absent"].sum(), "Absent", "unmatched"),
+                (m6, (final_merged["Shift"] == "Not yet hired").sum(), "Not Yet Hired", "not-hired"),
+                (m7, (final_merged["HeadcountMatch"] == "✅ Matched").sum(), "HC Matched", "matched"),
             ]:
                 with col:
                     st.markdown(f'<div class="metric-card"><div class="metric-val {cls}">{val}</div><div class="metric-lbl">{lbl}</div></div>', unsafe_allow_html=True)
 
-            if unmatched_n > 0:
-                st.markdown(f'<div style="text-align:center;color:#f87171;font-size:0.85rem;margin-top:0.5rem;">⚠️ {unmatched_n:,} rows unmatched with headcount</div>', unsafe_allow_html=True)
+            if (final_merged["HeadcountMatch"] == "❌ Unmatched").sum() > 0:
+                st.markdown(f'<div style="text-align:center;color:#f87171;font-size:0.85rem;">⚠️ {(final_merged["HeadcountMatch"] == "❌ Unmatched").sum():,} rows unmatched</div>', unsafe_allow_html=True)
 
-            st.markdown("")
-            disp = (["Date","Name","CSLoginName","EmployeeNumber","OnSiteLocation",
+            # ── Display ──
+            disp = [c for c in (["Date","Name","CSLoginName","EmployeeNumber","OnSiteLocation",
                      "Day","Shift","Is Scheduled","Present","Absent","Leave","For Review",
                      "FirstLogin","LastLogout","Active","Break",
                      "Late","Late Minutes","HireStatus","Position",
                      "Employee", "Project", "Sub-Process", "Supervisor",
                      "Role", "Manager", "DOJ Knack", "Date of Separation",
                      "Billable/Buffer", "Active/Inactive",
-                     "HeadcountMatch"] + DAY_COLS)
-            disp = [c for c in disp if c in final_merged.columns]
+                     "HeadcountMatch"] + DAY_COLS) if c in final_merged.columns]
 
-            ta_all, ta_present, ta_review, ta_leave, ta_absent, ta_not_hired, ta_matched, ta_unmatched = st.tabs(
-                ["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent", "🔵 Not Yet Hired", "✅ HC Matched", "❌ HC Unmatched"]
-            )
-            with ta_all:
-                st.dataframe(clean_for_display(final_merged[disp]), width="stretch", height=420)
-            with ta_present:
-                st.dataframe(clean_for_display(final_merged[final_merged["Present"]==1][disp]), width="stretch", height=420)
-            with ta_review:
-                st.dataframe(clean_for_display(final_merged[final_merged["For Review"]==1][disp]), width="stretch", height=420)
-            with ta_leave:
-                st.dataframe(clean_for_display(final_merged[final_merged["Leave"]==1][disp]), width="stretch", height=420)
-            with ta_absent:
-                st.dataframe(clean_for_display(final_merged[final_merged["Absent"]==1][disp]), width="stretch", height=420)
-            with ta_not_hired:
-                st.dataframe(clean_for_display(final_merged[final_merged["Shift"]=="Not yet hired"][disp]), width="stretch", height=420)
-            with ta_matched:
-                st.dataframe(clean_for_display(final_merged[final_merged["HeadcountMatch"] == "✅ Matched"][disp]), width="stretch", height=420)
-            with ta_unmatched:
-                st.dataframe(clean_for_display(final_merged[final_merged["HeadcountMatch"] == "❌ Unmatched"][disp]), width="stretch", height=420)
+            tabs = st.tabs(["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent", "🔵 Not Yet Hired", "✅ HC Matched", "❌ HC Unmatched"])
+            filters = [
+                (tabs[0], None),
+                (tabs[1], final_merged["Present"] == 1),
+                (tabs[2], final_merged["For Review"] == 1),
+                (tabs[3], final_merged["Leave"] == 1),
+                (tabs[4], final_merged["Absent"] == 1),
+                (tabs[5], final_merged["Shift"] == "Not yet hired"),
+                (tabs[6], final_merged["HeadcountMatch"] == "✅ Matched"),
+                (tabs[7], final_merged["HeadcountMatch"] == "❌ Unmatched"),
+            ]
+            for tab, filt in filters:
+                with tab:
+                    df_show = final_merged[filt] if filt is not None else final_merged
+                    st.dataframe(clean_for_display(df_show[disp]), width="stretch", height=420)
 
+            # ── Download ──
             st.markdown("---")
-            ad1, ad2 = st.columns([2,1])
-            with ad1:
-                st.download_button("⬇️ Download Final Attendance as Excel", to_excel_bytes(final_merged), output_filename,
+            d1, d2 = st.columns([2,1])
+            with d1:
+                out_name = ts_files[0].name.replace(".xlsx","").replace(".xls","") + ".xlsx"
+                st.download_button("⬇️ Download Final as Excel", to_excel_bytes(final_merged), out_name,
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-            with ad2:
-                csv_name = output_filename.replace(".xlsx", ".csv").replace(".xls", ".csv")
-                st.download_button("⬇️ Download as CSV", final_merged.to_csv(index=False).encode(), csv_name, "text/csv", use_container_width=True)
+            with d2:
+                st.download_button("⬇️ Download as CSV", final_merged.to_csv(index=False).encode(),
+                    out_name.replace(".xlsx",".csv"), "text/csv", use_container_width=True)
