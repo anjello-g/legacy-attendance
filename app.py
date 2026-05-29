@@ -719,15 +719,16 @@ with tab2:
             output_filename = "attendance.xlsx"
 
             # Warn about stale headcount
-            if hc_date:
+            if hc_dates:
+                latest_hc = max(d for d in hc_dates if d is not None)
                 stale_files = []
                 for ts_file in ts_files:
                     ts_dt = parse_date_str(ts_file.name.replace(".xlsx","").replace(".xls",""))
-                    if ts_dt and ts_dt.date() > hc_date:
+                    if ts_dt and ts_dt.date() > latest_hc:
                         stale_files.append(ts_file.name)
                 if stale_files:
                     st.warning(
-                        f"⚠️ Headcount snapshot ({hc_date.strftime('%m/%d/%Y')}) is older than "
+                        f"⚠️ Latest headcount snapshot ({latest_hc.strftime('%m/%d/%Y')}) is older than "
                         f"some timesheet dates: {', '.join(stale_files)}. "
                         f"Consider using a newer headcount export.",
                         icon="📅"
