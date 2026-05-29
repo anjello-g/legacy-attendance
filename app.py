@@ -64,6 +64,31 @@ def normalize(name: str) -> str:
     if pd.isna(name): return ""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z\s]", "", str(name).lower().strip()))
 
+def build_staff_lookup(staff_df: pd.DataFrame) -> dict:
+    lookup: dict[str, list[int]] = {}
+    for idx, row in staff_df.iterrows():
+        key = normalize(row.get("Name", ""))
+        if key: lookup.setdefault(key, []).append(idx)
+        first = normalize(row.get("FirstName", ""))
+        last = normalize(row.get("LastName", ""))
+        if first and last:
+            lookup.setdefault(f"{first} {last}", []).append(idx)
+    return lookup
+
+def match_name(sched_name: str, lookup: dict, staff_df: pd.DataFrame):
+    norm = normalize(sched_name)
+    if not norm: return None, "no_name"
+    if norm in lookup:
+        return staff_df.loc[lookup[norm][0]], "exact"
+    best_score, best_key = 0.0, None
+    for key in lookup:
+        sc = SequenceMatcher(None, norm, key).ratio()
+        if sc > best_score:
+            best_score, best_key = sc, key
+    if best_score >= FUZZY_THRESHOLD and best_key:
+        return staff_df.loc[lookup[best_key][0]], f"fuzzy({best_score:.0%})"
+    return None, "unmatched"
+
 def normalize_schedule(val) -> str:
     if pd.isna(val): return "Rest Day"
     s = str(val).strip()
