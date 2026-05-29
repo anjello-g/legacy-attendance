@@ -397,9 +397,9 @@ def build_override_template() -> bytes:
 
 # ── UI header ─────────────────────────────────────────────────────────────────
 st.markdown("## 🗂️ Attendance Builder")
-st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave files + headcount DOJ check → Step 3: merge headcount data.</p>', unsafe_allow_html=True)
+st.markdown('<p style="color:#7c7f8e;margin-top:-0.5rem;">Step 1: build the roster → Step 2: process timesheets + leave + headcount merge + overrides → final attendance.</p>', unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Timesheet + Leave Attendance", "👤  Step 3 — Headcount Merge"])
+tab1, tab2 = st.tabs(["📋  Step 1 — Schedule + Staff", "⏱️  Step 2 — Build Final Attendance"])
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -572,7 +572,7 @@ with tab2:
                 cs_lookup.setdefault(cs, []).append(idx)
 
         st.markdown("")
-        st.markdown('<div class="section-header">⏱️ Timesheet File(s)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">⏱️ Timesheet File(s) *</div>', unsafe_allow_html=True)
         ts_files = st.file_uploader(
             "Upload timesheet(s) — filename = date (e.g. 5-17-2026.xlsx). Multi-upload supported.",
             type=["xlsx","xls"], accept_multiple_files=True,
@@ -588,48 +588,80 @@ with tab2:
         )
 
         st.markdown("")
-        st.markdown('<div class="section-header">👤 Headcount File</div>', unsafe_allow_html=True)
-        hc_file_step2 = st.file_uploader(
-            "Upload headcount export (e.g. Knack RCM Headcount_05.13.2026.xlsx). "
-            "Must contain ECN and DOJ Knack columns. Used for DOJ Knack check and Step 3 merge.",
+        st.markdown('<div class="section-header">👤 Headcount File *</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<span style="color:#7c7f8e;font-size:0.82rem;">'
+            'Required for DOJ Knack check and headcount merge. Must contain ECN and DOJ Knack columns.</span>',
+            unsafe_allow_html=True
+        )
+        hc_file = st.file_uploader(
+            "Upload headcount export (e.g. Knack RCM Headcount_05.13.2026.xlsx).",
             type=["xlsx","xls"],
             key="hc_step2", label_visibility="collapsed"
         )
 
         st.markdown("")
-        run_step2 = st.button("▶  Build Attendance", key="btn_step2")
+        st.markdown('<div class="section-header">📋 Override File (Optional)</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<span style="color:#7c7f8e;font-size:0.82rem;">'
+            '4 sheets: Schedule, Leave, Holidays, Exemptions. Overrides automated rules.</span>',
+            unsafe_allow_html=True
+        )
+        override_file = st.file_uploader(
+            "Override file",
+            type=["xlsx"],
+            key="override_uploader", label_visibility="collapsed"
+        )
+
+        st.markdown("")
+        tmpl1, tmpl2 = st.columns([1,1])
+        with tmpl1:
+            st.download_button(
+                "⬇️ Download Override Template",
+                build_override_template(),
+                "override_template.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        with tmpl2:
+            st.markdown(
+                '<div style="color:#7c7f8e;font-size:0.78rem;padding-top:0.4rem;">'
+                'Template includes sample rows for all 4 sheets.</div>',
+                unsafe_allow_html=True
+            )
+
+        st.markdown("")
+        run_step2 = st.button("▶  Build Final Attendance", key="btn_step2")
 
         if run_step2:
             if not ts_files:
                 st.warning("Upload at least one timesheet file.", icon="⚠️")
                 st.stop()
+            if not hc_file:
+                st.warning("Upload the headcount file.", icon="⚠️")
+                st.stop()
 
-            # ── Load headcount for DOJ Knack lookup ────────────────────────────
-            doj_lookup: dict[int, date] = {}  # EmployeeNumber (int) → DOJ date
-            hc_df_step2 = None
-            if hc_file_step2 is not None:
-                with st.spinner("Reading headcount file…"):
-                    hc_df_step2 = pd.read_excel(hc_file_step2, sheet_name=0)
-                if "ECN" not in hc_df_step2.columns:
-                    st.error("Headcount file must contain an **ECN** column.")
-                    st.stop()
-                if "DOJ Knack" not in hc_df_step2.columns:
-                    st.error("Headcount file must contain a **DOJ Knack** column.")
-                    st.stop()
-                hc_df_step2["ECN"] = pd.to_numeric(hc_df_step2["ECN"], errors="coerce")
-                hc_df_step2 = hc_df_step2.dropna(subset=["ECN"])
-                hc_df_step2["ECN"] = hc_df_step2["ECN"].astype(int)
-                for _, row in hc_df_step2.iterrows():
-                    ecn = int(row["ECN"])
-                    doj = parse_doj_knack(row.get("DOJ Knack"))
-                    if doj is not None:
-                        doj_lookup[ecn] = doj
-                st.info(f"Loaded {len(doj_lookup):,} DOJ Knack records from headcount file.")
-                # Store headcount df in session state for Step 3
-                st.session_state.headcount_df = hc_df_step2.copy()
-            else:
-                st.session_state.headcount_df = None
-                st.info("No headcount file uploaded. DOJ Knack check and Step 3 merge will be skipped.")
+            # ── Load headcount for DOJ Knack lookup + merge ───────────────────
+            doj_lookup: dict[int, date] = {}
+            hc_df = None
+            with st.spinner("Reading headcount file…"):
+                hc_df = pd.read_excel(hc_file, sheet_name=0)
+            if "ECN" not in hc_df.columns:
+                st.error("Headcount file must contain an **ECN** column.")
+                st.stop()
+            if "DOJ Knack" not in hc_df.columns:
+                st.error("Headcount file must contain a **DOJ Knack** column.")
+                st.stop()
+            hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce")
+            hc_df = hc_df.dropna(subset=["ECN"])
+            hc_df["ECN"] = hc_df["ECN"].astype(int)
+            for _, row in hc_df.iterrows():
+                ecn = int(row["ECN"])
+                doj = parse_doj_knack(row.get("DOJ Knack"))
+                if doj is not None:
+                    doj_lookup[ecn] = doj
+            st.info(f"Loaded {len(doj_lookup):,} DOJ Knack records from headcount file.")
+            st.session_state.headcount_df = hc_df.copy()
 
             leave_by_date: dict[str, pd.DataFrame] = {}
             if leave_files:
@@ -646,11 +678,10 @@ with tab2:
 
             for i, ts_file in enumerate(ts_files):
                 date_str_raw = ts_file.name.replace(".xlsx","").replace(".xls","")
-                date_str = normalize_filename_date(ts_file.name)  # normalized YYYY-MM-DD for matching
+                date_str = normalize_filename_date(ts_file.name)
                 if i == 0:
                     output_filename = f"{date_str_raw}.xlsx"
 
-                # Parse the attendance date for DOJ comparison
                 parsed_date = parse_date_str(date_str_raw)
                 date_obj = parsed_date.date() if parsed_date else None
 
@@ -670,7 +701,6 @@ with tab2:
                 leave_df = leave_by_date.get(date_str)
                 if leave_df is not None:
                     for _, lrow in leave_df.iterrows():
-                        # Try multiple possible name columns with aggressive cleaning
                         name = ""
                         for col in ["Name", "name", "Employee Name", "EmployeeName", "Full Name", "FullName"]:
                             if col in lrow and pd.notna(lrow[col]):
@@ -678,19 +708,18 @@ with tab2:
                                 if name:
                                     break
                         if name:
-                            # Extra-aggressive normalization: collapse all whitespace, lowercase, remove non-alpha
                             clean_name = re.sub(r"\s+", " ", name.lower().strip())
                             clean_name = re.sub(r"[^a-z\s]", "", clean_name)
                             leave_lookup[clean_name] = lrow.to_dict()
 
-                day_col = get_day_column(date_str)
+                day_col = get_day_column(date_str_raw)
 
                 for _, r_row in roster.iterrows():
                     cs_key = str(r_row.get("CSLoginName","") or "").strip().lower()
                     ts_row = ts_by_cs.get(cs_key)
 
                     out = {
-                        "Date":          date_str,
+                        "Date":          date_str_raw,
                         "Name":          r_row.get("Name",""),
                         "CSLoginName":   r_row.get("CSLoginName",""),
                         "EmployeeNumber":r_row.get("EmployeeNumber",""),
@@ -703,7 +732,6 @@ with tab2:
                         if day in r_row:
                             out[day] = r_row[day]
 
-                    # Is Scheduled
                     is_scheduled = 0
                     shift_str = "Rest Day"
                     if day_col and day_col in r_row:
@@ -712,13 +740,9 @@ with tab2:
                             is_scheduled = 1
                     out["Is Scheduled"] = is_scheduled
 
-                    # Day & Shift columns
                     out["Day"] = day_col if day_col else ""
                     out["Shift"] = shift_str if shift_str else ""
 
-                    # ── DOJ Knack check ──────────────────────────────────────
-                    # If headcount file was uploaded and we have a DOJ for this employee,
-                    # check if DOJ Knack is AFTER the attendance date
                     not_yet_hired = False
                     emp_num_raw = r_row.get("EmployeeNumber", "")
                     try:
@@ -732,11 +756,9 @@ with tab2:
                             not_yet_hired = True
                             out["Shift"] = "Not yet hired"
                             out["Is Scheduled"] = 0
-                            # Also update the day column for display consistency
                             if day_col and day_col in out:
                                 out[day_col] = "Not yet hired"
 
-                    # Timesheet fields
                     first_login_raw = None
                     active = None
                     if ts_row is not None:
@@ -758,9 +780,7 @@ with tab2:
                     if ts_row is not None:
                         ts_status = attendance_status(first_login_raw, active)
 
-                    # Leave detection
                     leave_status = None
-                    # Use the same aggressive normalization as the leave file
                     roster_name = str(r_row.get("Name", ""))
                     norm_name = re.sub(r"\s+", " ", roster_name.lower().strip())
                     norm_name = re.sub(r"[^a-z\s]", "", norm_name)
@@ -805,7 +825,6 @@ with tab2:
                     absent     = 0
 
                     if not_yet_hired:
-                        # Not yet hired: everything zero
                         present = 0
                         for_review = 0
                         leave = 0
@@ -814,16 +833,14 @@ with tab2:
                         pass
                     elif for_review == 1:
                         if shift_str == "Rest Day":
-                            # Rest day with low activity: For Review only, not Absent, not scheduled
                             absent = 0
                             is_scheduled = 0
                         else:
-                            # Working day with low activity: For Review + Absent + Scheduled
                             absent = 1
                             is_scheduled = 1
                     elif leave_status == "Leave":
                         leave = 1
-                        absent = 0  # Leave takes priority over Absent
+                        absent = 0
                     else:
                         absent = 1
 
@@ -832,13 +849,11 @@ with tab2:
                     out["Leave"]      = leave
                     out["Absent"]     = absent
 
-                    # ── Late calculation ─────────────────────────────────────
-                    # Only calculate late if not "Not yet hired"
                     if not_yet_hired:
                         out["Late"] = 0
                         out["Late Minutes"] = 0.0
                     else:
-                        shift_start_time = parse_shift_start(shift_str)  # shift from schedule
+                        shift_start_time = parse_shift_start(shift_str)
                         first_login_dt = safe_parse_datetime(first_login_raw) if ts_row else None
                         late_flag, late_minutes = compute_late(shift_start_time, first_login_dt, date_obj)
                         out["Late"] = late_flag
@@ -855,154 +870,8 @@ with tab2:
                 st.stop()
 
             att_df = pd.DataFrame(all_records)
-            st.session_state.attendance = att_df
 
-            total_rows = len(att_df)
-            present_n  = att_df["Present"].sum()
-            review_n   = att_df["For Review"].sum()
-            leave_n    = att_df["Leave"].sum()
-            absent_n   = att_df["Absent"].sum()
-            not_hired_n = (att_df["Shift"] == "Not yet hired").sum()
-
-            st.markdown("---")
-            ma1, ma2, ma3, ma4, ma5, ma6 = st.columns(6)
-            for col, val, lbl, cls in [
-                (ma1, total_rows, "Total Rows",   ""),
-                (ma2, present_n,  "Present",       "matched"),
-                (ma3, review_n,   "For Review",    "review"),
-                (ma4, leave_n,    "On Leave",      "neutral"),
-                (ma5, absent_n,   "Absent",        "unmatched"),
-                (ma6, not_hired_n, "Not Yet Hired", "not-hired"),
-            ]:
-                with col:
-                    st.markdown(
-                        f'<div class="metric-card"><div class="metric-val {cls}">{val}</div>'
-                        f'<div class="metric-lbl">{lbl}</div></div>',
-                        unsafe_allow_html=True
-                    )
-
-            st.markdown("")
-            disp = (["Date","Name","CSLoginName","EmployeeNumber","OnSiteLocation",
-                     "Day","Shift","Is Scheduled","Present","Absent","Leave","For Review",
-                     "FirstLogin","LastLogout","Active","Break",
-                     "Late","Late Minutes","HireStatus","Position"] + DAY_COLS)
-            disp = [c for c in disp if c in att_df.columns]
-
-            ta_all, ta_present, ta_review, ta_leave, ta_absent, ta_not_hired = st.tabs(
-                ["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent", "🔵 Not Yet Hired"]
-            )
-            with ta_all:
-                st.dataframe(clean_for_display(att_df[disp]), width="stretch", height=420)
-            with ta_present:
-                st.dataframe(clean_for_display(att_df[att_df["Present"]==1][disp]),
-                             width="stretch", height=420)
-            with ta_review:
-                st.dataframe(clean_for_display(att_df[att_df["For Review"]==1][disp]),
-                             width="stretch", height=420)
-            with ta_leave:
-                st.dataframe(clean_for_display(att_df[att_df["Leave"]==1][disp]),
-                             width="stretch", height=420)
-            with ta_absent:
-                st.dataframe(clean_for_display(att_df[att_df["Absent"]==1][disp]),
-                             width="stretch", height=420)
-            with ta_not_hired:
-                st.dataframe(clean_for_display(att_df[att_df["Shift"]=="Not yet hired"][disp]),
-                             width="stretch", height=420)
-
-            st.markdown("---")
-            ad1, ad2 = st.columns([2,1])
-            with ad1:
-                st.download_button("⬇️ Download Attendance as Excel",
-                    to_excel_bytes(att_df), output_filename,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True)
-            with ad2:
-                csv_name = output_filename.replace(".xlsx", ".csv").replace(".xls", ".csv")
-                st.download_button("⬇️ Download as CSV",
-                    att_df.to_csv(index=False).encode(),
-                    csv_name, "text/csv", use_container_width=True)
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Headcount Merge (uses headcount file from Step 2)
-# ════════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.markdown("")
-
-    attendance = st.session_state.attendance
-    hc_df = st.session_state.headcount_df
-
-    if attendance is None:
-        st.markdown("""
-        <div style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:12px;
-                    padding:2rem;text-align:center;color:#7c7f8e;margin-top:1rem;">
-            <div style="font-size:2.5rem;margin-bottom:0.5rem;">⏳</div>
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;
-                        color:#e8eaf0;margin-bottom:0.4rem;">Complete Step 2 first</div>
-            <div style="font-size:0.85rem;">
-                Build the attendance in <strong>Step 2</strong> before merging headcount data.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    elif hc_df is None:
-        st.markdown("""
-        <div style="background:#1a1d27;border:1px solid #2a2d3a;border-radius:12px;
-                    padding:2rem;text-align:center;color:#7c7f8e;margin-top:1rem;">
-            <div style="font-size:2.5rem;margin-bottom:0.5rem;">📤</div>
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;
-                        color:#e8eaf0;margin-bottom:0.4rem;">No Headcount File Found</div>
-            <div style="font-size:0.85rem;">
-                Please upload the headcount file in <strong>Step 2</strong> first.<br>
-                It will be reused here for the full headcount merge.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        step3_badge = '<span class="step-badge done">✔ Attendance + Headcount loaded</span>'
-        st.markdown(step3_badge, unsafe_allow_html=True)
-        st.markdown(f'<span style="color:#7c7f8e;font-size:0.82rem;">'
-                    f'{len(attendance):,} attendance rows · join key: EmployeeNumber → ECN</span>',
-                    unsafe_allow_html=True)
-
-        st.markdown("")
-        st.markdown('<div class="section-header">📋 Override File (Optional)</div>', unsafe_allow_html=True)
-        st.markdown(
-            '<span style="color:#7c7f8e;font-size:0.82rem;">'
-            'Upload an Excel file with 4 sheets: <strong>Schedule</strong>, <strong>Leave</strong>, '
-            '<strong>Holidays</strong>, <strong>Exemptions</strong>. '
-            'These manually override shifts, leave status, holiday rules, and HR status.<br>'
-            '<strong>Holidays</strong> sheet uses <strong>Project</strong> (matches headcount Project column). '
-            'Leave Sub-Process blank to apply to all sub-processes.<br>'
-            '<strong>Exemptions</strong> sheet overrides Active/Inactive and zeros out Schedule/Absent.</span>',
-            unsafe_allow_html=True
-        )
-        override_file = st.file_uploader(
-            "Override file",
-            type=["xlsx"],
-            key="override_uploader", label_visibility="collapsed"
-        )
-
-        st.markdown("")
-        tmpl1, tmpl2 = st.columns([1,1])
-        with tmpl1:
-            st.download_button(
-                "⬇️ Download Override Template",
-                build_override_template(),
-                "override_template.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-        with tmpl2:
-            st.markdown(
-                '<div style="color:#7c7f8e;font-size:0.78rem;padding-top:0.4rem;">'
-                'Template includes sample rows for all 3 sheets.</div>',
-                unsafe_allow_html=True
-            )
-
-        st.markdown("")
-        run_step3 = st.button("▶  Merge Headcount", key="btn_step3")
-
-        if run_step3:
+            # ── Merge Headcount ──────────────────────────────────────────────
             required_hc = {"ECN", "Employee", "Project", "Sub-Process", "Supervisor",
                            "Role", "Manager", "DOJ Knack", "Date of Separation",
                            "Billable/Buffer", "Active/Inactive"}
@@ -1015,7 +884,7 @@ with tab3:
             hc_df = hc_df.dropna(subset=["ECN"])
             hc_df["ECN"] = hc_df["ECN"].astype(int)
 
-            att_merge = attendance.copy()
+            att_merge = att_df.copy()
             att_merge["_merge_key"] = pd.to_numeric(att_merge["EmployeeNumber"], errors="coerce")
             att_merge = att_merge.dropna(subset=["_merge_key"])
             att_merge["_merge_key"] = att_merge["_merge_key"].astype(int)
@@ -1035,17 +904,9 @@ with tab3:
             merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
             merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
 
-            # ── unmatched headcount rule ───────────────────────────────────────
-            # If headcount match is Unmatched, set Is Scheduled = 0 and Absent = 0
-            unmatched_mask = merged["HeadcountMatch"] == "❌ Unmatched"
-            merged.loc[unmatched_mask, "Is Scheduled"] = 0
-            merged.loc[unmatched_mask, "Absent"] = 0
-
             # ── separation date rule ─────────────────────────────────────────
-            # If Date of Separation is present (not null/blank), set Absent & Is Scheduled to 0
             sep_col = "Date of Separation"
             if sep_col in merged.columns:
-                # Convert to string to catch empty strings; also handle datetime NaT
                 has_sep = merged[sep_col].apply(
                     lambda x: pd.notna(x) and str(x).strip() != "" and str(x).strip().lower() != "nat"
                 )
@@ -1053,14 +914,10 @@ with tab3:
                 merged.loc[has_sep, "Is Scheduled"] = 0
 
             # ── Maternity / Suspended Active/Inactive rule ────────────────────
-            # If Role contains "Maternity" or "Suspended":
-            #   - Has login (Active > 0.1): Scheduled=1, Present=1, Absent=0, Leave=0, Active/Inactive=Active
-            #   - No login or Active <= 0.1: Scheduled=0, Absent=0, Leave=0 (even with plotted leave)
             if "Role" in merged.columns:
                 role_lower = merged["Role"].astype(str).str.lower()
                 is_mat_or_susp = role_lower.str.contains("maternity|suspended", case=False, na=False)
 
-                # Has meaningful login
                 has_login = merged["Present"] == 1
                 mat_susp_with_login = is_mat_or_susp & has_login
                 merged.loc[mat_susp_with_login, "Is Scheduled"] = 1
@@ -1070,13 +927,11 @@ with tab3:
                 if "Active/Inactive" in merged.columns:
                     merged.loc[mat_susp_with_login, "Active/Inactive"] = "Active"
 
-                # No meaningful login
                 no_login = merged["Present"] == 0
                 mat_susp_no_login = is_mat_or_susp & no_login
                 merged.loc[mat_susp_no_login, "Is Scheduled"] = 0
                 merged.loc[mat_susp_no_login, "Absent"] = 0
                 merged.loc[mat_susp_no_login, "Leave"] = 0
-                # Active/Inactive is NOT changed here
 
             # ── DOJ Knack re-check after merge ────────────────────────────────
             if "DOJ Knack" in merged.columns:
@@ -1096,7 +951,6 @@ with tab3:
                         merged.at[idx, "Leave"] = 0
                         merged.at[idx, "Late"] = 0
                         merged.at[idx, "Late Minutes"] = 0.0
-                        # Update day column too
                         day_col = row.get("Day", "")
                         if day_col and day_col in DAY_COLS and day_col in merged.columns:
                             merged.at[idx, day_col] = "Not yet hired"
@@ -1110,7 +964,6 @@ with tab3:
                     if "Schedule" in xl.sheet_names:
                         sched_ov = pd.read_excel(override_file, sheet_name="Schedule")
                         required_sched = {"ECN", "Effective Date", "Effective Until"}
-                        # Check for at least one day column
                         day_cols_found = [d for d in DAY_COLS if d in sched_ov.columns]
                         if required_sched.issubset(set(sched_ov.columns)) and day_cols_found:
                             sched_ov["ECN"] = pd.to_numeric(sched_ov["ECN"], errors="coerce")
@@ -1125,13 +978,6 @@ with tab3:
                                 if eff_start is None or eff_end is None:
                                     continue
 
-                                # Find all merged rows matching this ECN and date range
-                                mask = (
-                                    (merged["EmployeeNumber"].astype(str).str.strip() == str(ecn)) &
-                                    (merged["Date"].apply(lambda d: parse_date_str(str(d)) is not None)) &
-                                    (merged["Date"].apply(lambda d: parse_override_date(str(d)) is not None))
-                                )
-                                # More precise date range check
                                 date_mask = []
                                 for _, mrow in merged.iterrows():
                                     mdate = parse_override_date(str(mrow.get("Date", "")))
@@ -1196,7 +1042,6 @@ with tab3:
                                     merged.at[idx, "Absent"] = 0
                                     merged.at[idx, "Present"] = 0
                                     merged.at[idx, "For Review"] = 0
-                                    # If they were "Not yet hired", clear that too
                                     if merged.at[idx, "Shift"] == "Not yet hired":
                                         day_name = ov_date.strftime("%a")
                                         if day_name in merged.columns:
@@ -1231,164 +1076,162 @@ with tab3:
                                     continue
 
                                 for idx in merged[date_mask].index:
-                                    # Default holiday rule: not scheduled, not absent, not on leave
                                     merged.at[idx, "Is Scheduled"] = 0
                                     merged.at[idx, "Absent"] = 0
                                     merged.at[idx, "Leave"] = 0
-                                    # BUT if they are Present (worked on holiday), mark as scheduled
                                     if merged.at[idx, "Present"] == 1:
                                         merged.at[idx, "Is Scheduled"] = 1
-                                    # Update shift display
                                     if merged.at[idx, "Shift"] not in ("Not yet hired", "Leave"):
                                         merged.at[idx, "Shift"] = "Holiday"
                                         day_name = hol_date.strftime("%a")
                                         if day_name in merged.columns:
                                             merged.at[idx, day_name] = "Holiday"
 
+                    # 4. Exemptions
+                    if "Exemptions" in xl.sheet_names:
+                        exempt_ov = pd.read_excel(override_file, sheet_name="Exemptions")
+                        if {"ECN", "Exemption Date", "Effective Until", "Active/Inactive"}.issubset(set(exempt_ov.columns)):
+                            exempt_ov["ECN"] = pd.to_numeric(exempt_ov["ECN"], errors="coerce")
+                            exempt_ov = exempt_ov.dropna(subset=["ECN"])
+                            exempt_ov["ECN"] = exempt_ov["ECN"].astype(int)
+
+                            for _, ov_row in exempt_ov.iterrows():
+                                ecn = int(ov_row["ECN"])
+                                eff_start = parse_override_date(ov_row.get("Exemption Date"))
+                                eff_end   = parse_override_date(ov_row.get("Effective Until"))
+                                new_status = str(ov_row.get("Active/Inactive", "")).strip()
+
+                                if eff_start is None or eff_end is None:
+                                    continue
+
+                                date_mask = []
+                                for _, mrow in merged.iterrows():
+                                    mdate = parse_override_date(str(mrow.get("Date", "")))
+                                    match = (
+                                        str(mrow.get("EmployeeNumber", "")).strip() == str(ecn) and
+                                        mdate is not None and eff_start <= mdate <= eff_end
+                                    )
+                                    date_mask.append(match)
+
+                                if not any(date_mask):
+                                    continue
+
+                                for idx in merged[date_mask].index:
+                                    merged.at[idx, "Is Scheduled"] = 0
+                                    merged.at[idx, "Absent"] = 0
+                                    if "Active/Inactive" in merged.columns and new_status:
+                                        merged.at[idx, "Active/Inactive"] = new_status
+
                 st.success("✔ Overrides applied!")
 
-            # ── Exemptions processing ──────────────────────────────────────────
-            if override_file is not None and "Exemptions" in xl.sheet_names:
-                exemp_ov = pd.read_excel(override_file, sheet_name="Exemptions")
-                if {"ECN", "Effective Date", "Effective Until", "Status"}.issubset(set(exemp_ov.columns)):
-                    exemp_ov["ECN"] = pd.to_numeric(exemp_ov["ECN"], errors="coerce")
-                    exemp_ov = exemp_ov.dropna(subset=["ECN"])
-                    exemp_ov["ECN"] = exemp_ov["ECN"].astype(int)
-
-                    for _, ov_row in exemp_ov.iterrows():
-                        ecn = int(ov_row["ECN"])
-                        eff_start = parse_override_date(ov_row.get("Effective Date"))
-                        eff_end = parse_override_date(ov_row.get("Effective Until"))
-                        status = str(ov_row.get("Status", "")).strip()
-
-                        if eff_start is None or eff_end is None:
-                            continue
-
-                        date_mask = []
-                        for _, mrow in merged.iterrows():
-                            mdate = parse_override_date(str(mrow.get("Date", "")))
-                            match = (
-                                str(mrow.get("EmployeeNumber", "")).strip() == str(ecn) and
-                                mdate is not None and eff_start <= mdate <= eff_end
-                            )
-                            date_mask.append(match)
-
-                        if not any(date_mask):
-                            continue
-
-                        for idx in merged[date_mask].index:
-                            merged.at[idx, "Is Scheduled"] = 0
-                            merged.at[idx, "Absent"] = 0
-                            if status and "Active/Inactive" in merged.columns:
-                                merged.at[idx, "Active/Inactive"] = status
-
-            # ── Maternity / Suspended logic ────────────────────────────────────
-            if "Active/Inactive" in merged.columns:
-                mat_susp_mask = merged["Active/Inactive"].astype(str).str.strip().str.lower().isin(["maternity", "suspended"])
-
-                for idx in merged[mat_susp_mask].index:
-                    row = merged.loc[idx]
-                    active_val = row.get("Active", 0)
-                    first_login = row.get("FirstLogin", "")
-
-                    try:
-                        active_float = float(active_val) if pd.notna(active_val) else 0.0
-                    except (ValueError, TypeError):
-                        active_float = 0.0
-
-                    has_login = pd.notna(first_login) and str(first_login).strip() not in ("", "NaT")
-
-                    if has_login and active_float > 0.1:
-                        # Has login and active > 0.1
-                        merged.at[idx, "Is Scheduled"] = 1
-                        merged.at[idx, "Present"] = 1
-                        merged.at[idx, "Absent"] = 0
-                        merged.at[idx, "Leave"] = 0
-                        merged.at[idx, "Active/Inactive"] = "Active"
-                    else:
-                        # No login or active <= 0.1
-                        merged.at[idx, "Is Scheduled"] = 0
-                        merged.at[idx, "Absent"] = 0
-                        merged.at[idx, "Leave"] = 0
-                        # Don't change Active/Inactive
-
             # ── Final consistency rules ────────────────────────────────────────
-            # Rule 1: If not scheduled, cannot be Absent or on Leave
+            # Unmatched headcount → Is Scheduled = 0, Absent = 0
+            unmatched_mask = merged["HeadcountMatch"] == "❌ Unmatched"
+            merged.loc[unmatched_mask, "Is Scheduled"] = 0
+            merged.loc[unmatched_mask, "Absent"] = 0
+
+            # If not scheduled, cannot be Absent or on Leave
             not_scheduled = merged["Is Scheduled"] == 0
             merged.loc[not_scheduled, "Absent"] = 0
             merged.loc[not_scheduled, "Leave"] = 0
 
-            # Rule 2: If not scheduled but Present, they were effectively scheduled
+            # If not scheduled but Present, they were effectively scheduled
             present_but_not_scheduled = (merged["Is Scheduled"] == 0) & (merged["Present"] == 1)
             merged.loc[present_but_not_scheduled, "Is Scheduled"] = 1
 
-            # Rule 3: For Review → Absent = 1 (only when actually scheduled / not Rest Day)
+            # For Review → Absent = 1 (only when scheduled)
             for_review_mask = (merged["For Review"] == 1) & (merged["Is Scheduled"] == 1)
             merged.loc[for_review_mask, "Absent"] = 1
 
-            # Rule 4: Leave = 1 → Absent = 0 (Leave takes priority)
+            # Leave = 1 → Absent = 0
             leave_mask = merged["Leave"] == 1
             merged.loc[leave_mask, "Absent"] = 0
 
+            st.session_state.attendance = merged
             st.session_state.merged_headcount = merged
 
-            total_m    = len(merged)
+            # ── Metrics ───────────────────────────────────────────────────────
+            total_rows = len(merged)
+            present_n  = merged["Present"].sum()
+            review_n   = merged["For Review"].sum()
+            leave_n    = merged["Leave"].sum()
+            absent_n   = merged["Absent"].sum()
+            not_hired_n = (merged["Shift"] == "Not yet hired").sum()
             matched_n  = (merged["HeadcountMatch"] == "✅ Matched").sum()
             unmatched_n = (merged["HeadcountMatch"] == "❌ Unmatched").sum()
-            not_hired_m = (merged["Shift"] == "Not yet hired").sum()
 
             st.markdown("---")
-            mm1, mm2, mm3, mm4 = st.columns(4)
+            ma1, ma2, ma3, ma4, ma5, ma6, ma7 = st.columns(7)
             for col, val, lbl, cls in [
-                (mm1, total_m,     "Total Rows",      ""),
-                (mm2, matched_n,   "Matched",         "matched"),
-                (mm3, unmatched_n, "Unmatched",        "unmatched"),
-                (mm4, not_hired_m, "Not Yet Hired",   "not-hired"),
+                (ma1, total_rows, "Total Rows",   ""),
+                (ma2, present_n,  "Present",       "matched"),
+                (ma3, review_n,   "For Review",    "review"),
+                (ma4, leave_n,    "On Leave",      "neutral"),
+                (ma5, absent_n,   "Absent",        "unmatched"),
+                (ma6, not_hired_n, "Not Yet Hired", "not-hired"),
+                (ma7, matched_n,  "HC Matched",    "matched"),
             ]:
                 with col:
                     st.markdown(
-                        f'<div class="metric-card"><div class="metric-val {cls}">{val:,}</div>'
+                        f'<div class="metric-card"><div class="metric-val {cls}">{val}</div>'
                         f'<div class="metric-lbl">{lbl}</div></div>',
                         unsafe_allow_html=True
                     )
 
+            if unmatched_n > 0:
+                st.markdown(
+                    f'<div style="text-align:center;color:#f87171;font-size:0.85rem;margin-top:0.5rem;">'
+                    f'⚠️ {unmatched_n:,} rows unmatched with headcount</div>',
+                    unsafe_allow_html=True
+                )
+
             st.markdown("")
-            st.success("✔ Headcount merged! Review and download below.")
+            disp = (["Date","Name","CSLoginName","EmployeeNumber","OnSiteLocation",
+                     "Day","Shift","Is Scheduled","Present","Absent","Leave","For Review",
+                     "FirstLogin","LastLogout","Active","Break",
+                     "Late","Late Minutes","HireStatus","Position",
+                     "Employee", "Project", "Sub-Process", "Supervisor",
+                     "Role", "Manager", "DOJ Knack", "Date of Separation",
+                     "Billable/Buffer", "Active/Inactive",
+                     "HeadcountMatch"] + DAY_COLS)
+            disp = [c for c in disp if c in merged.columns]
 
-            display_cols = (["Date", "Name", "CSLoginName", "EmployeeNumber",
-                            "OnSiteLocation", "Day","Shift","Is Scheduled",
-                            "Present", "Absent", "Leave", "For Review",
-                            "FirstLogin","LastLogout","Active","Break",
-                            "Late","Late Minutes",
-                            "Employee", "Project", "Sub-Process", "Supervisor",
-                            "Role", "Manager", "DOJ Knack", "Date of Separation",
-                            "Billable/Buffer", "Active/Inactive",
-                            "HeadcountMatch"] + DAY_COLS)
-            display_cols = [c for c in display_cols if c in merged.columns]
-
-            t_all, t_matched, t_unmatched, t_not_hired = st.tabs(
-                ["All Records", "✅ Matched", "❌ Unmatched", "🔵 Not Yet Hired"]
+            ta_all, ta_present, ta_review, ta_leave, ta_absent, ta_not_hired, ta_matched, ta_unmatched = st.tabs(
+                ["All", "✅ Present", "🟠 For Review", "🌴 Leave", "❌ Absent", "🔵 Not Yet Hired", "✅ HC Matched", "❌ HC Unmatched"]
             )
-            with t_all:
-                st.dataframe(clean_for_display(merged[display_cols]), width="stretch", height=420)
-            with t_matched:
-                st.dataframe(clean_for_display(merged[merged["HeadcountMatch"] == "✅ Matched"][display_cols]),
+            with ta_all:
+                st.dataframe(clean_for_display(merged[disp]), width="stretch", height=420)
+            with ta_present:
+                st.dataframe(clean_for_display(merged[merged["Present"]==1][disp]),
                              width="stretch", height=420)
-            with t_unmatched:
-                st.dataframe(clean_for_display(merged[merged["HeadcountMatch"] == "❌ Unmatched"][display_cols]),
+            with ta_review:
+                st.dataframe(clean_for_display(merged[merged["For Review"]==1][disp]),
                              width="stretch", height=420)
-            with t_not_hired:
-                st.dataframe(clean_for_display(merged[merged["Shift"] == "Not yet hired"][display_cols]),
+            with ta_leave:
+                st.dataframe(clean_for_display(merged[merged["Leave"]==1][disp]),
+                             width="stretch", height=420)
+            with ta_absent:
+                st.dataframe(clean_for_display(merged[merged["Absent"]==1][disp]),
+                             width="stretch", height=420)
+            with ta_not_hired:
+                st.dataframe(clean_for_display(merged[merged["Shift"]=="Not yet hired"][disp]),
+                             width="stretch", height=420)
+            with ta_matched:
+                st.dataframe(clean_for_display(merged[merged["HeadcountMatch"] == "✅ Matched"][disp]),
+                             width="stretch", height=420)
+            with ta_unmatched:
+                st.dataframe(clean_for_display(merged[merged["HeadcountMatch"] == "❌ Unmatched"][disp]),
                              width="stretch", height=420)
 
             st.markdown("---")
-            md1, md2 = st.columns([2,1])
-            with md1:
-                st.download_button("⬇️ Download Final as Excel",
-                    to_excel_bytes(merged), "final_attendance.xlsx",
+            ad1, ad2 = st.columns([2,1])
+            with ad1:
+                st.download_button("⬇️ Download Final Attendance as Excel",
+                    to_excel_bytes(merged), output_filename,
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True)
-            with md2:
+            with ad2:
+                csv_name = output_filename.replace(".xlsx", ".csv").replace(".xls", ".csv")
                 st.download_button("⬇️ Download as CSV",
                     merged.to_csv(index=False).encode(),
-                    "final_attendance.csv", "text/csv", use_container_width=True)
+                    csv_name, "text/csv", use_container_width=True)
