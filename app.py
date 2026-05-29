@@ -258,6 +258,37 @@ def normalize_filename_date(filename: str) -> str:
         return dt.strftime("%Y-%m-%d")
     return base  # fallback to raw string if unparseable
 
+# ── Headcount date extractor ────────────────────────────────────────────────────
+def extract_headcount_date(filename: str, hc_df: pd.DataFrame) -> date:
+    """Try to find the effective date of a headcount file.
+    1. Look for 'Date Exported' column in the dataframe
+    2. Parse date from filename (e.g. Headcount_05.13.2026.xlsx)
+    3. Return None if neither works
+    """
+    # Check for Date Exported column
+    for col in ["Date Exported", "DateExported", "Export Date", "ExportDate", "Date", "As Of"]:
+        if col in hc_df.columns:
+            val = hc_df[col].dropna().iloc[0] if len(hc_df) > 0 else None
+            if val is not None:
+                dt = safe_parse_datetime(val)
+                if dt is not None:
+                    return dt.date() if hasattr(dt, 'date') else dt
+
+    # Try filename
+    base = filename.replace(".xlsx", "").replace(".xls", "").strip()
+    # Look for patterns like _05.13.2026 or _05-13-2026 or _5-1-2026
+    dt = parse_date_str(base)
+    if dt is not None:
+        return dt.date()
+
+    return None
+    """Parse a date from a filename (e.g. '5-1-2026.xlsx') and return YYYY-MM-DD string."""
+    base = filename.replace(".xlsx", "").replace(".xls", "").strip()
+    dt = parse_date_str(base)
+    if dt is not None:
+        return dt.strftime("%Y-%m-%d")
+    return base  # fallback to raw string if unparseable
+
 # ── Override date helper ──────────────────────────────────────────────────────
 def parse_override_date(value) -> date:
     """Parse an override file date value. Returns None if unparseable."""
@@ -588,15 +619,16 @@ with tab2:
         )
 
         st.markdown("")
-        st.markdown('<div class="section-header">👤 Headcount File *</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">👤 Headcount File(s) *</div>', unsafe_allow_html=True)
         st.markdown(
             '<span style="color:#7c7f8e;font-size:0.82rem;">'
-            'Required for DOJ Knack check and headcount merge. Must contain ECN and DOJ Knack columns.</span>',
+            'Upload one or more running headcount exports. The app picks the best file per timesheet date '
+            'based on the export date in the filename (e.g. Headcount_05.13.2026.xlsx).</span>',
             unsafe_allow_html=True
         )
-        hc_file = st.file_uploader(
-            "Upload headcount export (e.g. Knack RCM Headcount_05.13.2026.xlsx).",
-            type=["xlsx","xls"],
+        hc_files = st.file_uploader(
+            "Upload headcount export(s).",
+            type=["xlsx","xls"], accept_multiple_files=True,
             key="hc_step2", label_visibility="collapsed"
         )
 
@@ -637,31 +669,41 @@ with tab2:
             if not ts_files:
                 st.warning("Upload at least one timesheet file.", icon="⚠️")
                 st.stop()
-            if not hc_file:
-                st.warning("Upload the headcount file.", icon="⚠️")
+            if not hc_files:
+                st.warning("Upload at least one headcount file.", icon="⚠️")
                 st.stop()
 
-            # ── Load headcount for DOJ Knack lookup + merge ───────────────────
-            doj_lookup: dict[int, date] = {}
-            hc_df = None
-            with st.spinner("Reading headcount file…"):
-                hc_df = pd.read_excel(hc_file, sheet_name=0)
-            if "ECN" not in hc_df.columns:
-                st.error("Headcount file must contain an **ECN** column.")
-                st.stop()
-            if "DOJ Knack" not in hc_df.columns:
-                st.error("Headcount file must contain a **DOJ Knack** column.")
-                st.stop()
-            hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce")
-            hc_df = hc_df.dropna(subset=["ECN"])
-            hc_df["ECN"] = hc_df["ECN"].astype(int)
-            for _, row in hc_df.iterrows():
-                ecn = int(row["ECN"])
-                doj = parse_doj_knack(row.get("DOJ Knack"))
-                if doj is not None:
-                    doj_lookup[ecn] = doj
-            st.info(f"Loaded {len(doj_lookup):,} DOJ Knack records from headcount file.")
-            st.session_state.headcount_df = hc_df.copy()
+            # ── Pre-read all headcount files ─────────────────────────────────
+            hc_cache: dict[str, pd.DataFrame] = {}
+            hc_dates: list[date] = []
+
+            with st.spinner(f"Reading {len(hc_files)} headcount file(s)…"):
+                for f in hc_files:
+                    export_dt = parse_headcount_export_date(f.name)
+                    dt_key = export_dt.strftime("%Y-%m-%d") if export_dt else f.name
+                    try:
+                        df = pd.read_excel(f, sheet_name=0)
+                        if "ECN" not in df.columns:
+                            st.error(f"Headcount file **{f.name}** missing **ECN** column.")
+                            st.stop()
+                        if "DOJ Knack" not in df.columns:
+                            st.error(f"Headcount file **{f.name}** missing **DOJ Knack** column.")
+                            st.stop()
+                        df["ECN"] = pd.to_numeric(df["ECN"], errors="coerce")
+                        df = df.dropna(subset=["ECN"])
+                        df["ECN"] = df["ECN"].astype(int)
+                        hc_cache[dt_key] = df
+                        if export_dt:
+                            hc_dates.append(export_dt)
+                    except Exception as e:
+                        st.error(f"Error reading headcount **{f.name}**: {e}")
+                        st.stop()
+
+            if hc_dates:
+                hc_dates.sort()
+                st.info(f"Headcount export dates detected: {', '.join(d.strftime('%m-%d-%Y') for d in hc_dates)}")
+            else:
+                st.warning("Could not parse dates from headcount filenames. Using first file for all dates.", icon="⚠️")
 
             leave_by_date: dict[str, pd.DataFrame] = {}
             if leave_files:
@@ -672,9 +714,24 @@ with tab2:
                     except Exception as e:
                         st.error(f"Error reading leave file **{lf.name}**: {e}")
 
-            all_records = []
-            errors      = []
+            all_merged_records: list[pd.DataFrame] = []
+            errors = []
             output_filename = "attendance.xlsx"
+
+            # Warn about stale headcount
+            if hc_date:
+                stale_files = []
+                for ts_file in ts_files:
+                    ts_dt = parse_date_str(ts_file.name.replace(".xlsx","").replace(".xls",""))
+                    if ts_dt and ts_dt.date() > hc_date:
+                        stale_files.append(ts_file.name)
+                if stale_files:
+                    st.warning(
+                        f"⚠️ Headcount snapshot ({hc_date.strftime('%m/%d/%Y')}) is older than "
+                        f"some timesheet dates: {', '.join(stale_files)}. "
+                        f"Consider using a newer headcount export.",
+                        icon="📅"
+                    )
 
             for i, ts_file in enumerate(ts_files):
                 date_str_raw = ts_file.name.replace(".xlsx","").replace(".xls","")
@@ -684,6 +741,34 @@ with tab2:
 
                 parsed_date = parse_date_str(date_str_raw)
                 date_obj = parsed_date.date() if parsed_date else None
+
+                # ── Pick the best headcount for this timesheet date ──────────────
+                hc_df = None
+                hc_export_dt = None
+                if date_obj is not None and hc_dates:
+                    best_dt = None
+                    for dt in sorted(hc_dates):
+                        if dt <= date_obj:
+                            best_dt = dt
+                    if best_dt is None:
+                        best_dt = min(hc_dates)
+                    hc_export_dt = best_dt
+                    hc_df = hc_cache[best_dt.strftime("%Y-%m-%d")]
+                else:
+                    hc_df = next(iter(hc_cache.values()))
+
+                # Build DOJ lookup for this specific headcount
+                doj_lookup: dict[int, date] = {}
+                for _, row in hc_df.iterrows():
+                    ecn = int(row["ECN"])
+                    doj = parse_doj_knack(row.get("DOJ Knack"))
+                    if doj is not None:
+                        doj_lookup[ecn] = doj
+
+                if hc_export_dt:
+                    st.write(f"📅 **{date_str_raw}** → headcount exported **{hc_export_dt.strftime('%m-%d-%Y')}** ({len(doj_lookup):,} DOJ records)")
+                else:
+                    st.write(f"📅 **{date_str_raw}** → headcount file ({len(doj_lookup):,} DOJ records)")
 
                 try:
                     ts_df = read_timesheet(ts_file)
@@ -713,6 +798,7 @@ with tab2:
                             leave_lookup[clean_name] = lrow.to_dict()
 
                 day_col = get_day_column(date_str_raw)
+                all_records = []
 
                 for _, r_row in roster.iterrows():
                     cs_key = str(r_row.get("CSLoginName","") or "").strip().lower()
@@ -861,101 +947,109 @@ with tab2:
 
                     all_records.append(out)
 
+                if not all_records:
+                    continue
+
+                att_df = pd.DataFrame(all_records)
+
+                # ── Merge Headcount for this date ──────────────────────────────
+                required_hc = {"ECN", "Employee", "Project", "Sub-Process", "Supervisor",
+                               "Role", "Manager", "DOJ Knack", "Date of Separation",
+                               "Billable/Buffer", "Active/Inactive"}
+                missing_hc = required_hc - set(hc_df.columns)
+                if missing_hc:
+                    st.error(f"Headcount file for {date_str_raw} missing required columns: {missing_hc}")
+                    continue
+
+                hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce")
+                hc_df = hc_df.dropna(subset=["ECN"])
+                hc_df["ECN"] = hc_df["ECN"].astype(int)
+
+                att_merge = att_df.copy()
+                att_merge["_merge_key"] = pd.to_numeric(att_merge["EmployeeNumber"], errors="coerce")
+                att_merge = att_merge.dropna(subset=["_merge_key"])
+                att_merge["_merge_key"] = att_merge["_merge_key"].astype(int)
+
+                hc_cols = ["ECN", "Employee", "Project", "Sub-Process", "Supervisor",
+                           "Role", "Manager", "DOJ Knack", "Date of Separation",
+                           "Billable/Buffer", "Active/Inactive"]
+                hc_subset = hc_df[hc_cols].copy()
+
+                merged = att_merge.merge(
+                    hc_subset,
+                    left_on="_merge_key",
+                    right_on="ECN",
+                    how="left"
+                )
+
+                merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
+                merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
+
+                # ── separation date rule ─────────────────────────────────────
+                sep_col = "Date of Separation"
+                if sep_col in merged.columns:
+                    has_sep = merged[sep_col].apply(
+                        lambda x: pd.notna(x) and str(x).strip() != "" and str(x).strip().lower() != "nat"
+                    )
+                    merged.loc[has_sep, "Absent"] = 0
+                    merged.loc[has_sep, "Is Scheduled"] = 0
+
+                # ── Maternity / Suspended rule ────────────────────────────────
+                if "Role" in merged.columns:
+                    role_lower = merged["Role"].astype(str).str.lower()
+                    is_mat_or_susp = role_lower.str.contains("maternity|suspended", case=False, na=False)
+
+                    has_login = merged["Present"] == 1
+                    mat_susp_with_login = is_mat_or_susp & has_login
+                    merged.loc[mat_susp_with_login, "Is Scheduled"] = 1
+                    merged.loc[mat_susp_with_login, "Present"] = 1
+                    merged.loc[mat_susp_with_login, "Absent"] = 0
+                    merged.loc[mat_susp_with_login, "Leave"] = 0
+                    if "Active/Inactive" in merged.columns:
+                        merged.loc[mat_susp_with_login, "Active/Inactive"] = "Active"
+
+                    no_login = merged["Present"] == 0
+                    mat_susp_no_login = is_mat_or_susp & no_login
+                    merged.loc[mat_susp_no_login, "Is Scheduled"] = 0
+                    merged.loc[mat_susp_no_login, "Absent"] = 0
+                    merged.loc[mat_susp_no_login, "Leave"] = 0
+
+                # ── DOJ Knack re-check after merge ────────────────────────────
+                if "DOJ Knack" in merged.columns:
+                    for idx, row in merged.iterrows():
+                        doj_val = row.get("DOJ Knack")
+                        date_str = row.get("Date", "")
+                        doj_date = parse_doj_knack(doj_val)
+                        parsed_date = parse_date_str(str(date_str))
+                        date_obj = parsed_date.date() if parsed_date else None
+
+                        if doj_date is not None and date_obj is not None and doj_date > date_obj:
+                            merged.at[idx, "Shift"] = "Not yet hired"
+                            merged.at[idx, "Is Scheduled"] = 0
+                            merged.at[idx, "Absent"] = 0
+                            merged.at[idx, "Present"] = 0
+                            merged.at[idx, "For Review"] = 0
+                            merged.at[idx, "Leave"] = 0
+                            merged.at[idx, "Late"] = 0
+                            merged.at[idx, "Late Minutes"] = 0.0
+                            day_col = row.get("Day", "")
+                            if day_col and day_col in DAY_COLS and day_col in merged.columns:
+                                merged.at[idx, day_col] = "Not yet hired"
+
+                all_merged_records.append(merged)
+
             if errors:
                 for e in errors:
                     st.error(e)
 
-            if not all_records:
+            if not all_merged_records:
                 st.warning("No records processed.")
                 st.stop()
 
-            att_df = pd.DataFrame(all_records)
+            # Concatenate all per-date merged dataframes
+            merged = pd.concat(all_merged_records, ignore_index=True)
 
-            # ── Merge Headcount ──────────────────────────────────────────────
-            required_hc = {"ECN", "Employee", "Project", "Sub-Process", "Supervisor",
-                           "Role", "Manager", "DOJ Knack", "Date of Separation",
-                           "Billable/Buffer", "Active/Inactive"}
-            missing_hc = required_hc - set(hc_df.columns)
-            if missing_hc:
-                st.error(f"Headcount file missing required columns: {missing_hc}")
-                st.stop()
-
-            hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce")
-            hc_df = hc_df.dropna(subset=["ECN"])
-            hc_df["ECN"] = hc_df["ECN"].astype(int)
-
-            att_merge = att_df.copy()
-            att_merge["_merge_key"] = pd.to_numeric(att_merge["EmployeeNumber"], errors="coerce")
-            att_merge = att_merge.dropna(subset=["_merge_key"])
-            att_merge["_merge_key"] = att_merge["_merge_key"].astype(int)
-
-            hc_cols = ["ECN", "Employee", "Project", "Sub-Process", "Supervisor",
-                       "Role", "Manager", "DOJ Knack", "Date of Separation",
-                       "Billable/Buffer", "Active/Inactive"]
-            hc_subset = hc_df[hc_cols].copy()
-
-            merged = att_merge.merge(
-                hc_subset,
-                left_on="_merge_key",
-                right_on="ECN",
-                how="left"
-            )
-
-            merged = merged.drop(columns=["_merge_key", "ECN"], errors="ignore")
-            merged["HeadcountMatch"] = merged["Employee"].notna().map({True: "✅ Matched", False: "❌ Unmatched"})
-
-            # ── separation date rule ─────────────────────────────────────────
-            sep_col = "Date of Separation"
-            if sep_col in merged.columns:
-                has_sep = merged[sep_col].apply(
-                    lambda x: pd.notna(x) and str(x).strip() != "" and str(x).strip().lower() != "nat"
-                )
-                merged.loc[has_sep, "Absent"] = 0
-                merged.loc[has_sep, "Is Scheduled"] = 0
-
-            # ── Maternity / Suspended Active/Inactive rule ────────────────────
-            if "Role" in merged.columns:
-                role_lower = merged["Role"].astype(str).str.lower()
-                is_mat_or_susp = role_lower.str.contains("maternity|suspended", case=False, na=False)
-
-                has_login = merged["Present"] == 1
-                mat_susp_with_login = is_mat_or_susp & has_login
-                merged.loc[mat_susp_with_login, "Is Scheduled"] = 1
-                merged.loc[mat_susp_with_login, "Present"] = 1
-                merged.loc[mat_susp_with_login, "Absent"] = 0
-                merged.loc[mat_susp_with_login, "Leave"] = 0
-                if "Active/Inactive" in merged.columns:
-                    merged.loc[mat_susp_with_login, "Active/Inactive"] = "Active"
-
-                no_login = merged["Present"] == 0
-                mat_susp_no_login = is_mat_or_susp & no_login
-                merged.loc[mat_susp_no_login, "Is Scheduled"] = 0
-                merged.loc[mat_susp_no_login, "Absent"] = 0
-                merged.loc[mat_susp_no_login, "Leave"] = 0
-
-            # ── DOJ Knack re-check after merge ────────────────────────────────
-            if "DOJ Knack" in merged.columns:
-                for idx, row in merged.iterrows():
-                    doj_val = row.get("DOJ Knack")
-                    date_str = row.get("Date", "")
-                    doj_date = parse_doj_knack(doj_val)
-                    parsed_date = parse_date_str(str(date_str))
-                    date_obj = parsed_date.date() if parsed_date else None
-
-                    if doj_date is not None and date_obj is not None and doj_date > date_obj:
-                        merged.at[idx, "Shift"] = "Not yet hired"
-                        merged.at[idx, "Is Scheduled"] = 0
-                        merged.at[idx, "Absent"] = 0
-                        merged.at[idx, "Present"] = 0
-                        merged.at[idx, "For Review"] = 0
-                        merged.at[idx, "Leave"] = 0
-                        merged.at[idx, "Late"] = 0
-                        merged.at[idx, "Late Minutes"] = 0.0
-                        day_col = row.get("Day", "")
-                        if day_col and day_col in DAY_COLS and day_col in merged.columns:
-                            merged.at[idx, day_col] = "Not yet hired"
-
-            # ── Override processing ──────────────────────────────────────────
+            # ── Override processing (applied once across all dates) ──────────
             if override_file is not None:
                 with st.spinner("Applying overrides…"):
                     xl = pd.ExcelFile(override_file)
@@ -1125,25 +1219,20 @@ with tab2:
                 st.success("✔ Overrides applied!")
 
             # ── Final consistency rules ────────────────────────────────────────
-            # Unmatched headcount → Is Scheduled = 0, Absent = 0
             unmatched_mask = merged["HeadcountMatch"] == "❌ Unmatched"
             merged.loc[unmatched_mask, "Is Scheduled"] = 0
             merged.loc[unmatched_mask, "Absent"] = 0
 
-            # If not scheduled, cannot be Absent or on Leave
             not_scheduled = merged["Is Scheduled"] == 0
             merged.loc[not_scheduled, "Absent"] = 0
             merged.loc[not_scheduled, "Leave"] = 0
 
-            # If not scheduled but Present, they were effectively scheduled
             present_but_not_scheduled = (merged["Is Scheduled"] == 0) & (merged["Present"] == 1)
             merged.loc[present_but_not_scheduled, "Is Scheduled"] = 1
 
-            # For Review → Absent = 1 (only when scheduled)
             for_review_mask = (merged["For Review"] == 1) & (merged["Is Scheduled"] == 1)
             merged.loc[for_review_mask, "Absent"] = 1
 
-            # Leave = 1 → Absent = 0
             leave_mask = merged["Leave"] == 1
             merged.loc[leave_mask, "Absent"] = 0
 
