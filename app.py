@@ -64,29 +64,75 @@ def normalize(name: str) -> str:
     if pd.isna(name): return ""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z\s]", "", str(name).lower().strip()))
 
+def is_active_hire_status(status) -> bool:
+    """Return True if HireStatus indicates an active/current employee."""
+    if pd.isna(status):
+        return True  # Unknown = assume active
+    s = str(status).lower().strip()
+    # Active/rehired indicators
+    active_terms = {"active", "rehired", "hired", "new hire", "onboarding", "probation", "regular", "permanent"}
+    # Inactive/terminated indicators
+    inactive_terms = {"terminated", "separated", "resigned", "inactive", "retired", "end of contract", "eoc", "awol", "blacklisted"}
+    if any(t in s for t in active_terms):
+        return True
+    if any(t in s for t in inactive_terms):
+        return False
+    return True  # Default to active for unknown statuses
+
 def build_staff_lookup(staff_df: pd.DataFrame) -> dict:
-    lookup: dict[str, list[int]] = {}
+    """Build lookup that stores (index, hire_status_is_active) tuples."""
+    lookup: dict[str, list[tuple[int, bool]]] = {}
     for idx, row in staff_df.iterrows():
+        is_active = is_active_hire_status(row.get("HireStatus"))
         key = normalize(row.get("Name", ""))
-        if key: lookup.setdefault(key, []).append(idx)
+        if key:
+            lookup.setdefault(key, []).append((idx, is_active))
         first = normalize(row.get("FirstName", ""))
         last = normalize(row.get("LastName", ""))
         if first and last:
-            lookup.setdefault(f"{first} {last}", []).append(idx)
+            lookup.setdefault(f"{first} {last}", []).append((idx, is_active))
     return lookup
 
-def match_name(sched_name: str, lookup: dict, staff_df: pd.DataFrame):
+def match_name(sched_name: str, lookup: dict, staff_df: pd.DataFrame, sched_hire_status: str = None):
+    """Match schedule name to staff. Prefer active/rehired records over terminated ones."""
     norm = normalize(sched_name)
     if not norm: return None, "no_name"
+
     if norm in lookup:
-        return staff_df.loc[lookup[norm][0]], "exact"
+        matches = lookup[norm]
+        # If only one match, use it
+        if len(matches) == 1:
+            return staff_df.loc[matches[0][0]], "exact"
+        # Multiple matches — prefer active over inactive
+        active_matches = [m for m in matches if m[1]]
+        if active_matches:
+            # If schedule has HireStatus hint, try to match it
+            if sched_hire_status is not None:
+                sched_active = is_active_hire_status(sched_hire_status)
+                hinted = [m for m in active_matches if m[1] == sched_active]
+                if hinted:
+                    return staff_df.loc[hinted[0][0]], "exact"
+            return staff_df.loc[active_matches[0][0]], "exact"
+        # No active matches, fall back to first match
+        return staff_df.loc[matches[0][0]], "exact"
+
+    # Fuzzy fallback
     best_score, best_key = 0.0, None
     for key in lookup:
         sc = SequenceMatcher(None, norm, key).ratio()
         if sc > best_score:
             best_score, best_key = sc, key
     if best_score >= FUZZY_THRESHOLD and best_key:
-        return staff_df.loc[lookup[best_key][0]], f"fuzzy({best_score:.0%})"
+        matches = lookup[best_key]
+        active_matches = [m for m in matches if m[1]]
+        if active_matches:
+            if sched_hire_status is not None:
+                sched_active = is_active_hire_status(sched_hire_status)
+                hinted = [m for m in active_matches if m[1] == sched_active]
+                if hinted:
+                    return staff_df.loc[hinted[0][0]], f"fuzzy({best_score:.0%})"
+            return staff_df.loc[active_matches[0][0]], f"fuzzy({best_score:.0%})"
+        return staff_df.loc[matches[0][0]], f"fuzzy({best_score:.0%})"
     return None, "unmatched"
 
 def normalize_schedule(val) -> str:
@@ -281,7 +327,8 @@ with tab1:
             lookup = build_staff_lookup(staff_df)
             records = []
             for _, row in sched_df.iterrows():
-                matched, mtype = match_name(row["Name"], lookup, staff_df)
+                sched_status = row.get("HireStatus", None)
+                matched, mtype = match_name(row["Name"], lookup, staff_df, sched_hire_status=sched_status)
                 out = row.to_dict()
                 for day in DAY_COLS:
                     if day in out:
