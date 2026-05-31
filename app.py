@@ -542,10 +542,16 @@ with tab2:
                 base_df["_leave_status"] = base_df["_leave_row"].apply(vec_leave_status)
 
                 # ── Vectorized flag calculation ──
+                # Present = 1 ONLY if Active >= 0.1 AND has First Login
                 base_df["Present"] = (base_df["_ts_status"] == "Present").astype(int)
                 base_df["For Review"] = (base_df["_ts_status"] == "For Review").astype(int)
                 base_df["Leave"] = (base_df["_leave_status"] == "Leave").astype(int)
                 base_df["Absent"] = 0
+
+                # RULE: If Present = 1, Leave MUST be 0 (Present wins over Leave)
+                # This only applies when Is Scheduled = 1
+                scheduled_and_present = (base_df["Is Scheduled"] == 1) & (base_df["Present"] == 1)
+                base_df.loc[scheduled_and_present, "Leave"] = 0
 
                 # For Review on Rest Day → not absent, not scheduled
                 fr_rest = (base_df["For Review"] == 1) & (base_df["Shift"] == "Rest Day")
@@ -557,8 +563,8 @@ with tab2:
                 base_df.loc[fr_work, "Absent"] = 1
                 base_df.loc[fr_work, "Is Scheduled"] = 1
 
-                # Leave → absent=0
-                leave_mask = base_df["Leave"] == 1
+                # Leave → absent=0 (but only if not already fixed by Present rule above)
+                leave_mask = (base_df["Leave"] == 1)
                 base_df.loc[leave_mask, "Absent"] = 0
 
                 # Neither present, for_review, nor leave → absent
@@ -745,6 +751,11 @@ with tab2:
                 st.success("✔ Overrides applied!")
 
             # ── Final consistency ──
+            # Priority: Present > Leave > For Review > Absent
+            # If Scheduled = 1 and Present = 1, clear Leave
+            sched_present = (final_merged["Is Scheduled"] == 1) & (final_merged["Present"] == 1)
+            final_merged.loc[sched_present, "Leave"] = 0
+
             um = final_merged["HeadcountMatch"] == "❌ Unmatched"
             final_merged.loc[um, ["Is Scheduled", "Absent"]] = [0, 0]
 
