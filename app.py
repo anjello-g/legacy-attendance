@@ -547,9 +547,9 @@ with tab2:
                         av = float(act) if pd.notna(act) else 0.0
                     except:
                         av = 0.0
-                    if has_login and av >= 0.1:
+                    if has_login and av >= 0.03:
                         return "Present"
-                    if has_login and av < 0.1:
+                    if has_login and av < 0.03:
                         return "For Review"
                     if not has_login and av > 0:
                         return "For Review"
