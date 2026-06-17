@@ -575,7 +575,7 @@ with tab2:
                             except:
                                 if str(val).strip().lower() in ("1", "yes", "true", "y"):
                                     return "Absent"
-                    for col in ["VL", "ML", "BL", "SPL", "PL", "MWL", "BDL"]:
+                    for col in ["VL", "ML", "BL", "SPL", "PL", "MWL", "BDL", "HLD", "OFST", "PTO"]:
                         val = leave_row.get(col, 0)
                         if pd.notna(val):
                             try:
