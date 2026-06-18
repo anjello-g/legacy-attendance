@@ -88,7 +88,7 @@ def build_staff_lookups(staff_df: pd.DataFrame) -> tuple[dict, dict]:
         is_active = is_active_hire_status(row.get("HireStatus"))
 
         # ECN lookup (primary)
-        ecn_val = row.get("ECN")
+        ecn_val = row.get("EmployeeID")
         if pd.notna(ecn_val):
             try:
                 ecn_int = int(float(ecn_val))
