@@ -80,14 +80,14 @@ def is_active_hire_status(status) -> bool:
     return True  # Default to active for unknown statuses
 
 def build_staff_lookups(staff_df: pd.DataFrame) -> tuple[dict, dict]:
-    """Build two lookups: ECN-based and name-based."""
+    """Build two lookups: -based and name-based."""
     ecn_lookup: dict[int, tuple[int, bool]] = {}
     name_lookup: dict[str, list[tuple[int, bool]]] = {}
 
     for idx, row in staff_df.iterrows():
         is_active = is_active_hire_status(row.get("HireStatus"))
 
-        # ECN lookup (primary)
+        #  lookup (primary)
         ecn_val = row.get("EmployeeID")
         if pd.notna(ecn_val):
             try:
@@ -351,7 +351,7 @@ with tab1:
             st.error("Schedule must have a **Name** column."); st.stop()
 
         missing_staff = set()
-        if "ECN" not in staff_df.columns:
+        if "EmployeeID" not in staff_df.columns:
             missing_staff.add("ECN")
         if "CSLoginName" not in staff_df.columns:
             missing_staff.add("CSLoginName")
