@@ -352,7 +352,7 @@ with tab1:
 
         missing_staff = set()
         if "EmployeeID" not in staff_df.columns:
-            missing_staff.add("ECN")
+            missing_staff.add("EmployeeID")
         if "CSLoginName" not in staff_df.columns:
             missing_staff.add("CSLoginName")
         if "Name" not in staff_df.columns:
@@ -379,7 +379,7 @@ with tab1:
                     out.update({
                         "FullName_Staff": matched.get("Name", ""),
                         "CSLoginName": matched.get("CSLoginName", ""),
-                        "EmployeeNumber": matched.get("ECN", ""),
+                        "EmployeeNumber": matched.get("EmployeeID", ""),
                         "OnSiteLocation": loc,
                         "MatchType": mtype
                     })
