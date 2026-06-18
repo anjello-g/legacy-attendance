@@ -70,96 +70,108 @@ def is_active_hire_status(status) -> bool:
         return True  # Unknown = assume active
     s = str(status).lower().strip()
     # Active/rehired indicators
-    active_terms = {"active", "rehired", "hired", "new hire", "onboarding", "probation", "regular", "permanent", "production"}
+    active_terms = {"active", "rehired", "hired", "new hire", "onboarding", "probation", "regular", "permanent"}
     # Inactive/terminated indicators
-    inactive_terms = {"terminated", "separated", "resigned", "inactive", "retired", "end of contract", "eoc", "awol", "blacklisted", "discharged"}
+    inactive_terms = {"terminated", "separated", "resigned", "inactive", "retired", "end of contract", "eoc", "awol", "blacklisted"}
     if any(t in s for t in active_terms):
         return True
     if any(t in s for t in inactive_terms):
         return False
     return True  # Default to active for unknown statuses
 
-def build_staff_lookups(staff_df: pd.DataFrame) -> tuple[dict, dict]:
-    """Build two lookups: -based and name-based."""
-    ecn_lookup: dict[int, tuple[int, bool]] = {}
-    name_lookup: dict[str, list[tuple[int, bool]]] = {}
-
+def build_staff_lookup(staff_df: pd.DataFrame) -> dict:
+    """Build lookup that stores (index, hire_status_is_active) tuples keyed by EmployeeNumber."""
+    lookup: dict[int, list[tuple[int, bool]]] = {}
     for idx, row in staff_df.iterrows():
         is_active = is_active_hire_status(row.get("HireStatus"))
-
-        #  lookup (primary)
-        ecn_val = row.get("EmployeeID")
-        if pd.notna(ecn_val):
+        # Primary key: EmployeeNumber (numeric)
+        emp_num = row.get("EmployeeNumber")
+        if pd.notna(emp_num):
             try:
-                ecn_int = int(float(ecn_val))
-                ecn_lookup[ecn_int] = (idx, is_active)
+                emp_int = int(float(emp_num))
+                lookup.setdefault(emp_int, []).append((idx, is_active))
             except (ValueError, TypeError):
                 pass
-
-        # Name lookup (fallback)
+        # Fallback: normalized name
         key = normalize(row.get("Name", ""))
         if key:
-            name_lookup.setdefault(key, []).append((idx, is_active))
+            lookup.setdefault(key, []).append((idx, is_active))
         first = normalize(row.get("FirstName", ""))
         last = normalize(row.get("LastName", ""))
         if first and last:
-            name_lookup.setdefault(f"{first} {last}", []).append((idx, is_active))
+            lookup.setdefault(f"{first} {last}", []).append((idx, is_active))
+    return lookup
 
-    return ecn_lookup, name_lookup
+def match_employee(sched_row: pd.Series, lookup: dict, staff_df: pd.DataFrame):
+    """Match schedule row to staff. Priority: EmployeeNumber exact > Name exact > Name fuzzy."""
+    sched_emp_id = sched_row.get("EmployeeID")
+    sched_name = sched_row.get("Name", "")
+    sched_hire_status = sched_row.get("HireStatus", None)
 
-def match_employee(sched_row: pd.Series, ecn_lookup: dict, name_lookup: dict, staff_df: pd.DataFrame):
-    """Match schedule row to staff. Priority: EmployeeID/ECN exact > Name exact > Name fuzzy."""
-    # 1. Try EmployeeID → ECN match (PRIMARY)
-    emp_id = sched_row.get("EmployeeID")
-    if pd.notna(emp_id):
+    # Try 1: EmployeeID exact match (highest priority)
+    if pd.notna(sched_emp_id):
         try:
-            ecn_int = int(float(emp_id))
-            if ecn_int in ecn_lookup:
-                idx, is_active = ecn_lookup[ecn_int]
-                return staff_df.loc[idx], "exact_ecn"
+            emp_int = int(float(sched_emp_id))
+            if emp_int in lookup:
+                matches = lookup[emp_int]
+                if len(matches) == 1:
+                    return staff_df.loc[matches[0][0]], "exact_id"
+                # Multiple matches — prefer active over inactive
+                active_matches = [m for m in matches if m[1]]
+                if active_matches:
+                    if sched_hire_status is not None:
+                        sched_active = is_active_hire_status(sched_hire_status)
+                        hinted = [m for m in active_matches if m[1] == sched_active]
+                        if hinted:
+                            return staff_df.loc[hinted[0][0]], "exact_id"
+                    return staff_df.loc[active_matches[0][0]], "exact_id"
+                return staff_df.loc[matches[0][0]], "exact_id"
         except (ValueError, TypeError):
             pass
 
-    # 2. Fallback to name matching
-    sched_name = sched_row.get("Name", "")
-    sched_status = sched_row.get("HireStatus", None)
+    # Try 2: Name exact match (fallback)
     norm = normalize(sched_name)
-    if not norm:
-        return None, "no_name"
+    if not norm: return None, "no_name"
 
-    if norm in name_lookup:
-        matches = name_lookup[norm]
-        if len(matches) == 1:
-            return staff_df.loc[matches[0][0]], "exact_name"
-        # Multiple matches — prefer active over inactive
-        active_matches = [m for m in matches if m[1]]
+    if norm in lookup:
+        matches = lookup[norm]
+        # Filter out EmployeeNumber-keyed entries for name matching
+        name_matches = [m for m in matches if isinstance(m, tuple) and len(m) == 2]
+        if not name_matches:
+            name_matches = matches
+        if len(name_matches) == 1:
+            return staff_df.loc[name_matches[0][0]], "exact_name"
+        active_matches = [m for m in name_matches if m[1]]
         if active_matches:
-            if sched_status is not None:
-                sched_active = is_active_hire_status(sched_status)
+            if sched_hire_status is not None:
+                sched_active = is_active_hire_status(sched_hire_status)
                 hinted = [m for m in active_matches if m[1] == sched_active]
                 if hinted:
                     return staff_df.loc[hinted[0][0]], "exact_name"
             return staff_df.loc[active_matches[0][0]], "exact_name"
-        return staff_df.loc[matches[0][0]], "exact_name"
+        return staff_df.loc[name_matches[0][0]], "exact_name"
 
-    # 3. Fuzzy fallback
+    # Try 3: Fuzzy fallback
     best_score, best_key = 0.0, None
-    for key in name_lookup:
-        sc = SequenceMatcher(None, norm, key).ratio()
-        if sc > best_score:
-            best_score, best_key = sc, key
+    for key in lookup:
+        if isinstance(key, str):  # Only fuzzy match against string keys (names)
+            sc = SequenceMatcher(None, norm, key).ratio()
+            if sc > best_score:
+                best_score, best_key = sc, key
     if best_score >= FUZZY_THRESHOLD and best_key:
-        matches = name_lookup[best_key]
-        active_matches = [m for m in matches if m[1]]
+        matches = lookup[best_key]
+        name_matches = [m for m in matches if isinstance(m, tuple) and len(m) == 2]
+        if not name_matches:
+            name_matches = matches
+        active_matches = [m for m in name_matches if m[1]]
         if active_matches:
-            if sched_status is not None:
-                sched_active = is_active_hire_status(sched_status)
+            if sched_hire_status is not None:
+                sched_active = is_active_hire_status(sched_hire_status)
                 hinted = [m for m in active_matches if m[1] == sched_active]
                 if hinted:
                     return staff_df.loc[hinted[0][0]], f"fuzzy({best_score:.0%})"
             return staff_df.loc[active_matches[0][0]], f"fuzzy({best_score:.0%})"
-        return staff_df.loc[matches[0][0]], f"fuzzy({best_score:.0%})"
-
+        return staff_df.loc[name_matches[0][0]], f"fuzzy({best_score:.0%})"
     return None, "unmatched"
 
 def normalize_schedule(val) -> str:
@@ -344,42 +356,30 @@ with tab1:
             sched_df = pd.read_excel(sched_file, sheet_name=0)
             staff_df = pd.read_excel(staff_file, sheet_name=0)
 
-        # Validate required columns
-        if "EmployeeID" not in sched_df.columns:
-            st.error("Schedule must have an **EmployeeID** column."); st.stop()
         if "Name" not in sched_df.columns:
             st.error("Schedule must have a **Name** column."); st.stop()
+        if "EmployeeID" not in sched_df.columns:
+            st.error("Schedule must have an **EmployeeID** column."); st.stop()
+        missing = {"Name", "CSLoginName", "EmployeeNumber"} - set(staff_df.columns)
+        if missing:
+            st.error(f"Staff file missing: {missing}"); st.stop()
 
-        missing_staff = set()
-        if "EmployeeID" not in staff_df.columns:
-            missing_staff.add("EmployeeID")
-        if "CSLoginName" not in staff_df.columns:
-            missing_staff.add("CSLoginName")
-        if "Name" not in staff_df.columns:
-            missing_staff.add("Name")
-        if missing_staff:
-            st.error(f"Staff file missing required columns: {missing_staff}"); st.stop()
-
-        with st.spinner("Matching employees (EmployeeID → ECN priority)…"):
-            ecn_lookup, name_lookup = build_staff_lookups(staff_df)
+        with st.spinner("Matching employees…"):
+            lookup = build_staff_lookup(staff_df)
             records = []
             for _, row in sched_df.iterrows():
-                matched, mtype = match_employee(row, ecn_lookup, name_lookup, staff_df)
+                matched, mtype = match_employee(row, lookup, staff_df)
                 out = row.to_dict()
-                # Normalize schedule day columns
                 for day in DAY_COLS:
                     if day in out:
                         out[day] = normalize_schedule(out[day])
-
                 if matched is not None:
-                    # Map staff fields to roster output
-                    loc_raw = matched.get("On Site Location", matched.get("SiteLocation", matched.get("Location", "")))
+                    loc_raw = matched.get("On Site Location", "")
                     loc = loc_raw if (pd.notna(loc_raw) and str(loc_raw).strip()) else "WFH"
-
                     out.update({
                         "FullName_Staff": matched.get("Name", ""),
                         "CSLoginName": matched.get("CSLoginName", ""),
-                        "EmployeeNumber": matched.get("EmployeeID", ""),
+                        "EmployeeNumber": matched.get("EmployeeNumber", ""),
                         "OnSiteLocation": loc,
                         "MatchType": mtype
                     })
@@ -392,34 +392,23 @@ with tab1:
 
         roster = pd.DataFrame(records)
         before = len(roster)
-
-        # Filter excluded locations (check both SiteLocation from schedule and mapped OnSiteLocation)
-        if "SiteLocation" in roster.columns:
-            roster = roster[~roster["SiteLocation"].astype(str).str.strip().str.lower().isin(EXCLUDED_LOCATIONS)]
-        if "OnSiteLocation" in roster.columns:
-            roster = roster[~roster["OnSiteLocation"].astype(str).str.strip().str.lower().isin(EXCLUDED_LOCATIONS)]
-
+        roster = roster[~roster["OnSiteLocation"].str.strip().str.lower().isin(EXCLUDED_LOCATIONS)]
         st.session_state.roster = roster
 
         st.markdown("---")
-        m1, m2, m3, m4, m5 = st.columns(5)
+        m1, m2, m3, m4 = st.columns(4)
         for col, val, lbl, cls in [
             (m1, len(roster), "Roster Size", ""),
-            (m2, roster["MatchType"].str.startswith("exact_ecn").sum(), "ECN Match", "matched"),
-            (m3, roster["MatchType"].str.startswith("exact_name").sum(), "Name Match", "matched"),
-            (m4, roster["MatchType"].str.startswith("fuzzy").sum(), "Fuzzy", "fuzzy"),
-            (m5, roster["MatchType"].isin(["unmatched","no_name"]).sum(), "Unmatched", "unmatched"),
+            (m2, roster["MatchType"].str.startswith("exact").sum(), "Exact", "matched"),
+            (m3, roster["MatchType"].str.startswith("fuzzy").sum(), "Fuzzy", "fuzzy"),
+            (m4, roster["MatchType"].isin(["unmatched","no_name"]).sum(), "Unmatched", "unmatched"),
         ]:
             with col:
                 st.markdown(f'<div class="metric-card"><div class="metric-val {cls}">{val}</div><div class="metric-lbl">{lbl}</div></div>', unsafe_allow_html=True)
 
         st.success("✔ Roster built! Switch to **Step 2**.")
-
-        # Display columns - use whatever exists
-        disp_cols = [c for c in ["EmployeeID", "Name", "FullName_Staff", "CSLoginName", "EmployeeNumber", 
-                                  "OnSiteLocation", "SiteLocation", "HireStatus", "PositionName", "MatchType"] 
-                     if c in roster.columns]
-        st.dataframe(clean_for_display(roster[disp_cols]), width="stretch", height=380)
+        disp = [c for c in ["Name","FullName_Staff","CSLoginName","EmployeeNumber","OnSiteLocation","HireStatus","PositionName","MatchType"] + DAY_COLS if c in roster.columns]
+        st.dataframe(clean_for_display(roster[disp]), width="stretch", height=380)
 
         d1, d2 = st.columns([2,1])
         with d1:
@@ -543,18 +532,12 @@ with tab2:
             # 2. BUILD BASE ATTENDANCE DATAFRAME (vectorized, no Python loops)
             # ─────────────────────────────────────────────────────────────────
             with st.spinner("Building attendance records…"):
-                # Build roster_core with available columns only
-                core_cols = ["Name", "CSLoginName", "EmployeeNumber", "OnSiteLocation"]
-                # Add optional columns if they exist
-                for opt in ["HireStatus", "PositionName", "SiteLocation", "EmployeeID"]:
-                    if opt in roster.columns:
-                        core_cols.append(opt)
-                # Add day columns
-                core_cols = core_cols + [d for d in DAY_COLS if d in roster.columns]
-                # Deduplicate
-                core_cols = list(dict.fromkeys(core_cols))
-
-                roster_core = roster[[c for c in core_cols if c in roster.columns]].copy()
+                # Determine which columns exist in roster for the core selection
+                core_cols = ["Name", "CSLoginName", "EmployeeNumber", "OnSiteLocation",
+                             "HireStatus", "PositionName"]
+                available_core = [c for c in core_cols if c in roster.columns]
+                day_cols_available = [c for c in DAY_COLS if c in roster.columns]
+                roster_core = roster[available_core + day_cols_available].copy()
 
                 # Build date info dict
                 date_info = {}
