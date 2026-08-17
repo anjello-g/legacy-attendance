@@ -69,9 +69,7 @@ def is_active_hire_status(status) -> bool:
     if pd.isna(status):
         return True  # Unknown = assume active
     s = str(status).lower().strip()
-    # Active/rehired indicators
     active_terms = {"active", "rehired", "hired", "new hire", "onboarding", "probation", "regular", "permanent"}
-    # Inactive/terminated indicators
     inactive_terms = {"terminated", "separated", "resigned", "inactive", "retired", "end of contract", "eoc", "awol", "blacklisted"}
     if any(t in s for t in active_terms):
         return True
@@ -100,23 +98,18 @@ def match_name(sched_name: str, lookup: dict, staff_df: pd.DataFrame, sched_hire
 
     if norm in lookup:
         matches = lookup[norm]
-        # If only one match, use it
         if len(matches) == 1:
             return staff_df.loc[matches[0][0]], "exact"
-        # Multiple matches — prefer active over inactive
         active_matches = [m for m in matches if m[1]]
         if active_matches:
-            # If schedule has HireStatus hint, try to match it
             if sched_hire_status is not None:
                 sched_active = is_active_hire_status(sched_hire_status)
                 hinted = [m for m in active_matches if m[1] == sched_active]
                 if hinted:
                     return staff_df.loc[hinted[0][0]], "exact"
             return staff_df.loc[active_matches[0][0]], "exact"
-        # No active matches, fall back to first match
         return staff_df.loc[matches[0][0]], "exact"
 
-    # Fuzzy fallback
     best_score, best_key = 0.0, None
     for key in lookup:
         sc = SequenceMatcher(None, norm, key).ratio()
@@ -353,6 +346,11 @@ with tab1:
         roster = pd.DataFrame(records)
         before = len(roster)
         roster = roster[~roster["OnSiteLocation"].str.strip().str.lower().isin(EXCLUDED_LOCATIONS)]
+
+        # ✅ Deduplicate roster based on EmployeeNumber (or CSLoginName)
+        dedup_col = "EmployeeNumber" if "EmployeeNumber" in roster.columns else "CSLoginName"
+        roster = roster.drop_duplicates(subset=[dedup_col], keep="first")
+
         st.session_state.roster = roster
 
         st.markdown("---")
@@ -439,7 +437,7 @@ with tab2:
             # 1. LOAD ALL FILES INTO MEMORY (dict-based)
             # ─────────────────────────────────────────────────────────────────
             with st.spinner("Loading files into memory…"):
-                # Headcount files
+                # Headcount files — split by Date Exported
                 doj_lookup: dict[int, date] = {}
                 hc_cache: dict[str, pd.DataFrame] = {}
                 hc_dates: list[date] = []
@@ -459,19 +457,42 @@ with tab2:
                     if "ECN" not in df.columns or "DOJ Knack" not in df.columns:
                         st.error(f"Headcount **{f.name}** missing ECN or DOJ Knack"); st.stop()
 
-                    export_dt = extract_headcount_date(f.name, df)
-                    dt_key = export_dt.strftime("%Y-%m-%d") if export_dt else f.name
+                    # Find date column
+                    date_col = None
+                    for col in ["Date Exported", "DateExported", "Export Date", "ExportDate", "Date", "As Of"]:
+                        if col in df.columns:
+                            date_col = col
+                            break
+                    if date_col is None:
+                        st.error(f"Headcount **{f.name}** has no recognizable date column (e.g., 'Date Exported')."); st.stop()
 
+                    # Convert ECN to integer
                     df["ECN"] = pd.to_numeric(df["ECN"], errors="coerce").dropna().astype(int)
+
+                    # Build DOJ lookup (DOJ constant per ECN)
                     for _, row in df.iterrows():
                         doj = parse_doj_knack(row.get("DOJ Knack"))
                         if doj:
                             doj_lookup[int(row["ECN"])] = doj
-                    hc_cache[dt_key] = df
-                    hc_dates.append(export_dt)
+
+                    # Parse dates and split into per-date snapshots
+                    df["_date_parsed"] = df[date_col].apply(lambda x: safe_parse_datetime(x).date() if safe_parse_datetime(x) else None)
+                    df = df.dropna(subset=["_date_parsed"])
+                    unique_dates = sorted(df["_date_parsed"].unique())
+
+                    for dt in unique_dates:
+                        dt_key = dt.strftime("%Y-%m-%d")
+                        df_snapshot = df[df["_date_parsed"] == dt].drop(columns=["_date_parsed"]).copy()
+                        # Remove duplicate ECNs within the same snapshot (should not happen, but safe)
+                        df_snapshot = df_snapshot.drop_duplicates(subset=["ECN"], keep="first")
+                        hc_cache[dt_key] = df_snapshot
+                        hc_dates.append(dt)
+
+                # Remove duplicate dates from hc_dates
+                hc_dates = sorted(set(hc_dates))
 
                 if hc_dates:
-                    st.info(f"📅 Headcount snapshots: {', '.join(d.strftime('%m/%d/%Y') for d in sorted(hc_dates) if d)}")
+                    st.info(f"📅 Headcount snapshots: {', '.join(d.strftime('%m/%d/%Y') for d in hc_dates)}")
 
                 # Leave files — build dict of (normalized_name, date) → leave_row
                 leave_lookup: dict[tuple[str, str], dict] = {}
@@ -489,31 +510,26 @@ with tab2:
                             clean_name = normalize(name)
                             leave_lookup[(clean_name, ldate)] = lrow.to_dict()
 
-                    # Timesheets — build dict of (date, email_lower) → row_dict
-                    ts_lookup: dict[tuple[str, str], dict] = {}
-                    ts_dates: list[str] = []
-                    for tsf in ts_files:
-                        date_str = normalize_filename_date(tsf.name)
-                    
-                        # Only add the date once, even if multiple files share the same date
-                        if date_str not in ts_dates:
-                            ts_dates.append(date_str)
-                    
-                        tdf = read_timesheet(tsf)
-                        for _, trow in tdf.iterrows():
-                            email = str(trow.get("Agent Email", "")).strip().lower()
-                            if email:
-                                ts_lookup[(date_str, email)] = trow.to_dict()
+                # Timesheets — build dict of (date, email_lower) → row_dict, with date dedup
+                ts_lookup: dict[tuple[str, str], dict] = {}
+                ts_dates: list[str] = []
+                for tsf in ts_files:
+                    date_str = normalize_filename_date(tsf.name)
+                    if date_str not in ts_dates:
+                        ts_dates.append(date_str)
+                    tdf = read_timesheet(tsf)
+                    for _, trow in tdf.iterrows():
+                        email = str(trow.get("Agent Email", "")).strip().lower()
+                        if email:
+                            ts_lookup[(date_str, email)] = trow.to_dict()
 
             # ─────────────────────────────────────────────────────────────────
             # 2. BUILD BASE ATTENDANCE DATAFRAME (vectorized, no Python loops)
             # ─────────────────────────────────────────────────────────────────
             with st.spinner("Building attendance records…"):
-                # Create a cross-product of roster × dates using pandas
                 roster_core = roster[["Name", "CSLoginName", "EmployeeNumber", "OnSiteLocation",
                                        "HireStatus", "Position"] + DAY_COLS].copy()
 
-                # Build date info dict
                 date_info = {}
                 for d in ts_dates:
                     dt = parse_date_str(d)
@@ -522,7 +538,6 @@ with tab2:
                         "day_col": dt.strftime("%a") if dt else None,
                     }
 
-                # Repeat roster for each date
                 all_records = []
                 for d in ts_dates:
                     df_day = roster_core.copy()
@@ -533,7 +548,6 @@ with tab2:
 
                 base_df = pd.concat(all_records, ignore_index=True)
 
-                # ── Vectorized shift extraction ──
                 def get_shift_for_day(row):
                     dc = row["_day_col"]
                     if dc and dc in row:
@@ -543,19 +557,16 @@ with tab2:
                 base_df["Shift"] = base_df.apply(get_shift_for_day, axis=1)
                 base_df["Is Scheduled"] = (base_df["Shift"] != "Rest Day").astype(int)
 
-                # ── Vectorized timesheet join via dict lookup ──
                 base_df["_cs_lower"] = base_df["CSLoginName"].astype(str).str.strip().str.lower()
                 base_df["_ts_key"] = base_df.apply(lambda r: (normalize_filename_date(r["Date"]), r["_cs_lower"]), axis=1)
                 base_df["_ts_row"] = base_df["_ts_key"].map(ts_lookup)
 
-                # Extract timesheet fields vectorized
                 base_df["AgentEmail"] = base_df["_ts_row"].apply(lambda x: x.get("Agent Email", "") if isinstance(x, dict) else "")
                 base_df["FirstLogin"] = base_df["_ts_row"].apply(lambda x: x.get("First Login") if isinstance(x, dict) else None)
                 base_df["LastLogout"] = base_df["_ts_row"].apply(lambda x: x.get("Last Logout", "") if isinstance(x, dict) else "")
                 base_df["Active"] = base_df["_ts_row"].apply(lambda x: x.get("Active") if isinstance(x, dict) else None)
                 base_df["Break"] = base_df["_ts_row"].apply(lambda x: x.get("Break", "") if isinstance(x, dict) else "")
 
-                # ── Vectorized attendance status ──
                 def vec_attendance_status(row):
                     fl = row["FirstLogin"]
                     act = row["Active"]
@@ -574,12 +585,10 @@ with tab2:
 
                 base_df["_ts_status"] = base_df.apply(vec_attendance_status, axis=1)
 
-                # ── Vectorized leave join via dict lookup ──
                 base_df["_name_clean"] = base_df["Name"].apply(normalize)
                 base_df["_leave_key"] = base_df.apply(lambda r: (r["_name_clean"], normalize_filename_date(r["Date"])), axis=1)
                 base_df["_leave_row"] = base_df["_leave_key"].map(leave_lookup)
 
-                # Extract leave status vectorized
                 def vec_leave_status(leave_row):
                     if not isinstance(leave_row, dict):
                         return None
@@ -605,36 +614,27 @@ with tab2:
 
                 base_df["_leave_status"] = base_df["_leave_row"].apply(vec_leave_status)
 
-                # ── Vectorized flag calculation ──
-                # Present = 1 ONLY if Active >= 0.1 AND has First Login
                 base_df["Present"] = (base_df["_ts_status"] == "Present").astype(int)
                 base_df["For Review"] = (base_df["_ts_status"] == "For Review").astype(int)
                 base_df["Leave"] = (base_df["_leave_status"] == "Leave").astype(int)
                 base_df["Absent"] = 0
 
-                # RULE: If Present = 1, Leave MUST be 0 (Present wins over Leave)
-                # This only applies when Is Scheduled = 1
                 scheduled_and_present = (base_df["Is Scheduled"] == 1) & (base_df["Present"] == 1)
                 base_df.loc[scheduled_and_present, "Leave"] = 0
 
-                # For Review on Rest Day → not absent, not scheduled
                 fr_rest = (base_df["For Review"] == 1) & (base_df["Shift"] == "Rest Day")
                 base_df.loc[fr_rest, "Absent"] = 0
                 base_df.loc[fr_rest, "Is Scheduled"] = 0
 
-                # For Review on working day → absent, scheduled
                 fr_work = (base_df["For Review"] == 1) & (base_df["Shift"] != "Rest Day")
                 base_df.loc[fr_work, "Absent"] = 1
                 base_df.loc[fr_work, "Is Scheduled"] = 1
 
-                # Leave → absent=0 (but only if not already fixed by Present rule above)
                 leave_mask = (base_df["Leave"] == 1)
                 base_df.loc[leave_mask, "Absent"] = 0
 
-                # Neither present, for_review, nor leave → absent
                 base_df.loc[(base_df["Present"] == 0) & (base_df["For Review"] == 0) & (base_df["Leave"] == 0), "Absent"] = 1
 
-                # DOJ Knack check (vectorized)
                 base_df["_emp_num"] = pd.to_numeric(base_df["EmployeeNumber"], errors="coerce")
                 base_df["_doj"] = base_df["_emp_num"].map(doj_lookup)
                 not_yet = (base_df["_doj"].notna()) & (base_df["_date_obj"].notna()) & (base_df["_doj"] > base_df["_date_obj"])
@@ -648,7 +648,6 @@ with tab2:
                     mask = not_yet & (base_df["_day_col"] == dc)
                     base_df.loc[mask, dc] = "Not yet hired"
 
-                # Late calculation (vectorized where possible)
                 base_df["_shift_start"] = base_df["Shift"].apply(parse_shift_start)
                 base_df["_first_login_dt"] = base_df["FirstLogin"].apply(safe_parse_datetime)
                 base_df["Late"] = 0
@@ -672,15 +671,21 @@ with tab2:
                     day_df = base_df[base_df["Date"] == d].copy()
                     date_obj = date_info[d]["date_obj"]
 
-                    # Pick headcount
+                    # Pick headcount snapshot: latest date <= timesheet date
                     hc_df = None
                     if date_obj and hc_dates:
-                        best_dt = max((dt for dt in hc_dates if dt and dt <= date_obj), default=min(hc_dates))
+                        valid_dts = [dt for dt in hc_dates if dt <= date_obj]
+                        if valid_dts:
+                            best_dt = max(valid_dts)
+                        else:
+                            best_dt = min(hc_dates)  # fallback to earliest snapshot
                         hc_df = hc_cache[best_dt.strftime("%Y-%m-%d")]
                     else:
-                        hc_df = next(iter(hc_cache.values()))
+                        if hc_cache:
+                            hc_df = next(iter(hc_cache.values()))
+                        else:
+                            st.error("No valid headcount snapshots found."); st.stop()
 
-                    # Merge
                     hc_df = hc_df.copy()
                     hc_df["ECN"] = pd.to_numeric(hc_df["ECN"], errors="coerce").dropna().astype(int)
                     day_df["_merge_key"] = pd.to_numeric(day_df["EmployeeNumber"], errors="coerce").dropna().astype(int)
@@ -721,7 +726,6 @@ with tab2:
                 with st.spinner("Applying overrides…"):
                     xl = pd.ExcelFile(override_file)
 
-                    # Pre-parse for fast matching
                     final_merged["_date_parsed"] = final_merged["Date"].apply(lambda d: parse_override_date(str(d)) if pd.notna(d) else None)
                     final_merged["_emp_str"] = final_merged["EmployeeNumber"].astype(str).str.strip()
                     final_merged["_proj_lc"] = final_merged["Project"].astype(str).str.strip().str.lower()
@@ -815,8 +819,6 @@ with tab2:
                 st.success("✔ Overrides applied!")
 
             # ── Final consistency ──
-            # Priority: Present > Leave > For Review > Absent
-            # If Scheduled = 1 and Present = 1, clear Leave
             sched_present = (final_merged["Is Scheduled"] == 1) & (final_merged["Present"] == 1)
             final_merged.loc[sched_present, "Leave"] = 0
 
@@ -835,7 +837,6 @@ with tab2:
             lm = final_merged["Leave"] == 1
             final_merged.loc[lm, "Absent"] = 0
 
-            # Clean up temp columns
             drop_cols = [c for c in ["_cs_lower", "_ts_key", "_ts_row", "_name_clean", "_leave_key", "_leave_row",
                          "_emp_num", "_doj", "_shift_start", "_first_login_dt", "_date_obj", "_day_col", "_ts_status", "_leave_status"] if c in final_merged.columns]
             final_merged = final_merged.drop(columns=drop_cols, errors="ignore")
