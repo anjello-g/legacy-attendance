@@ -489,17 +489,21 @@ with tab2:
                             clean_name = normalize(name)
                             leave_lookup[(clean_name, ldate)] = lrow.to_dict()
 
-                # Timesheets — build dict of (date, email_lower) → row_dict
-                ts_lookup: dict[tuple[str, str], dict] = {}
-                ts_dates: list[str] = []
-                for tsf in ts_files:
-                    date_str = normalize_filename_date(tsf.name)
-                    ts_dates.append(date_str)
-                    tdf = read_timesheet(tsf)
-                    for _, trow in tdf.iterrows():
-                        email = str(trow.get("Agent Email", "")).strip().lower()
-                        if email:
-                            ts_lookup[(date_str, email)] = trow.to_dict()
+                    # Timesheets — build dict of (date, email_lower) → row_dict
+                    ts_lookup: dict[tuple[str, str], dict] = {}
+                    ts_dates: list[str] = []
+                    for tsf in ts_files:
+                        date_str = normalize_filename_date(tsf.name)
+                    
+                        # Only add the date once, even if multiple files share the same date
+                        if date_str not in ts_dates:
+                            ts_dates.append(date_str)
+                    
+                        tdf = read_timesheet(tsf)
+                        for _, trow in tdf.iterrows():
+                            email = str(trow.get("Agent Email", "")).strip().lower()
+                            if email:
+                                ts_lookup[(date_str, email)] = trow.to_dict()
 
             # ─────────────────────────────────────────────────────────────────
             # 2. BUILD BASE ATTENDANCE DATAFRAME (vectorized, no Python loops)
